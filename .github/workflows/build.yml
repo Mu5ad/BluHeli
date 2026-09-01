@@ -45,4 +45,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: BluHeli-unsigned-ipa
-          path: BluHeli/BluHeli-unsigned.ipa
+          path: BluHeli-unsigned.ipa
+          if-no-files-found: error
