@@ -402,15 +402,15 @@ struct ContentView: View {
             Section("Mando (trama en vivo abajo)") {
                 Toggle("Modo seguro (gas max 80)", isOn: $capSeguro).tint(.orange)
                 VStack(alignment: .leading) {
-                    HStack { Text("GAS").bold(); Spacer(); Text("\(Int(capSeguro ? min(gas, 80) : gas))").monospaced() }
+                    HStack { Text("GAS").bold(); Spacer(); Text("\(Int(capSeguro ? min(gas, 80) : gas))").font(.system(.body, design: .monospaced)) }
                     Slider(value: $gas, in: 64...128, step: 1)
                 }
                 VStack(alignment: .leading) {
-                    HStack { Text("PITCH").bold(); Spacer(); Text("\(Int(pitch))").monospaced() }
+                    HStack { Text("PITCH").bold(); Spacer(); Text("\(Int(pitch))").font(.system(.body, design: .monospaced)) }
                     Slider(value: $pitch, in: 0...255, step: 1)
                 }
                 VStack(alignment: .leading) {
-                    HStack { Text("YAW").bold(); Spacer(); Text("\(Int(yaw))").monospaced() }
+                    HStack { Text("YAW").bold(); Spacer(); Text("\(Int(yaw))").font(.system(.body, design: .monospaced)) }
                     Slider(value: $yaw, in: 0...255, step: 1)
                 }
                 HStack {
