@@ -12,11 +12,17 @@ jobs:
       - name: Instalar XcodeGen
         run: brew install xcodegen
 
-      - name: Generar proyecto Xcode
-        run: xcodegen generate --spec BluHeli/project.yml --project BluHeli
-
-      - name: Mostrar SDKs
-        run: xcodebuild -showsdks | head -20
+      - name: Generar proyecto + diagnosticar
+        run: |
+          xcodegen generate --spec BluHeli/project.yml --project BluHeli
+          echo "== contenido de BluHeli/ =="
+          ls -la BluHeli/
+          echo "== contenido de BluHeli/BluHeli.xcodeproj =="
+          ls -la BluHeli/BluHeli.xcodeproj/ || echo "NO EXISTE EL XCODEPROJ"
+          echo "== validar pbxproj =="
+          plutil -lint BluHeli/BluHeli.xcodeproj/project.pbxproj || true
+          echo "== esquemas =="
+          xcodebuild -list -project BluHeli/BluHeli.xcodeproj || true
 
       - name: Build unsigned (generic iOS device sin firma)
         run: |
