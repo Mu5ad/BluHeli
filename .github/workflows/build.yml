@@ -1,0 +1,45 @@
+name: Build BluHeli (unsigned IPA para firmar con Feather)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar XcodeGen
+        run: brew install xcodegen
+
+      - name: Generar proyecto Xcode
+        run: xcodegen generate
+        working-directory: BluHeli
+
+      - name: Mostrar SDKs
+        run: xcodebuild -showsdks | head -20
+
+      - name: Build unsigned (simulador no vale; generic iOS device sin firma)
+        run: |
+          set -o pipefail
+          xcodebuild -project BluHeli.xcodeproj \
+            -scheme BluHeli \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            archive -archivePath build/BluHeli.xcarchive | tail -30
+        working-directory: BluHeli
+
+      - name: Empaquetar IPA (Payload)
+        run: |
+          mkdir -p ipa/Payload
+          cp -R BluHeli/build/BluHeli.xcarchive/Products/Applications/*.app ipa/Payload/
+          cd ipa && zip -r ../BluHeli-unsigned.ipa Payload && cd ..
+          ls -la BluHeli-unsigned.ipa
+        working-directory: BluHeli
+
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: BluHeli-unsigned-ipa
+          path: BluHeli/BluHeli-unsigned.ipa

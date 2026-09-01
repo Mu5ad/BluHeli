@@ -1,0 +1,30 @@
+name: BluHeli
+options:
+  bundleIdPrefix: es.moon.heli
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+targets:
+  BluHeli:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    settings:
+      base:
+        INFOPLIST_KEY_UISupportedExternalAccessoryProtocols: "$(inherited)"
+    info:
+      path: Info.plist
+      properties:
+        UISupportedExternalAccessoryProtocols:
+          - com.silverlit.bt
+          - com.silverlit.bluetooth
+          - com.silverlit.heli
+          - com.silverlit.car
+          - fi.wellmon.wECCAN
+          - com.xpg.protocol
+          - com.silverlit.bleferraricar
+          - com.silverlit.btferrari
+        NSBluetoothAlwaysUsageDescription: "BluHeli usa Bluetooth para conectar con tu helicóptero Silverlit."
+        UILaunchScreen: {}
+        CODE_SIGNING_ALLOWED: "NO"
