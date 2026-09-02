@@ -10,21 +10,41 @@ targets:
     platform: iOS
     sources:
       - Sources
-    settings:
-      base:
-        INFOPLIST_KEY_UISupportedExternalAccessoryProtocols: "$(inherited)"
     info:
       path: Info.plist
       properties:
         UISupportedExternalAccessoryProtocols:
+          - com.silverlit.helicopter
+          - com.silverlit.ferrari
+          - com.silverlit.car
+          - com.silverlit.airplane
+          - com.silverlit.blueskyheli
+          - com.silverlit.bsh
+          - com.silverlit.bsh-a
+          - com.silverlit.blutech
+          - com.silverlit.blutechheli
+          - com.silverlit.toy
           - com.silverlit.bt
           - com.silverlit.bluetooth
           - com.silverlit.heli
-          - com.silverlit.car
-          - fi.wellmon.wECCAN
-          - com.xpg.protocol
+          - com.silverlit.control
+          - com.silverlit.smartlink
+          - com.silverlit.ia
+          - com.silverlit.ferraribt
+          - com.silverlit.rc
+          - com.silverlit.protocol
+          - com.silverlit.mfi
+          - com.silverlit.enzo
+          - com.silverlit.458
+          - com.silverlit.speed
           - com.silverlit.bleferraricar
           - com.silverlit.btferrari
-        NSBluetoothAlwaysUsageDescription: "BluHeli usa Bluetooth para conectar con tu helicóptero Silverlit."
+          - fi.wellmon.wECCAN
+          - com.xpg.protocol
+        UIBackgroundModes:
+          - external-accessory
+          - bluetooth-central
+        NSBluetoothAlwaysUsageDescription: "BluHeli usa Bluetooth para conectar y controlar tu helicóptero Silverlit."
+        NSBluetoothPeripheralUsageDescription: "BluHeli usa Bluetooth para comunicarse con accesorios MFi."
         UILaunchScreen: {}
         CODE_SIGNING_ALLOWED: "NO"

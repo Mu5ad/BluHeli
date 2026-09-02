@@ -1,7 +1,12 @@
 name: Build BluHeli (unsigned IPA para firmar con Feather)
 
 on:
+  push:
+    branches: [ "main" ]
   workflow_dispatch: {}
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -12,19 +17,12 @@ jobs:
       - name: Instalar XcodeGen
         run: brew install xcodegen
 
-      - name: Generar proyecto + diagnosticar
+      - name: Generar proyecto Xcode
         run: |
           xcodegen generate --spec BluHeli/project.yml --project BluHeli
-          echo "== contenido de BluHeli/ =="
-          ls -la BluHeli/
-          echo "== contenido de BluHeli/BluHeli.xcodeproj =="
-          ls -la BluHeli/BluHeli.xcodeproj/ || echo "NO EXISTE EL XCODEPROJ"
-          echo "== validar pbxproj =="
-          plutil -lint BluHeli/BluHeli.xcodeproj/project.pbxproj || true
-          echo "== esquemas =="
-          xcodebuild -list -project BluHeli/BluHeli.xcodeproj || true
+          xcodebuild -list -project BluHeli/BluHeli.xcodeproj
 
-      - name: Build unsigned (generic iOS device sin firma)
+      - name: Compilar App unsigned
         run: |
           set -o pipefail
           xcodebuild -project BluHeli/BluHeli.xcodeproj \
@@ -34,7 +32,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
             archive -archivePath BluHeli/build/BluHeli.xcarchive 2>&1 | tail -40
 
-      - name: Empaquetar IPA (Payload)
+      - name: Empaquetar IPA
         run: |
           mkdir -p ipa/Payload
           cp -R BluHeli/build/BluHeli.xcarchive/Products/Applications/*.app ipa/Payload/
@@ -47,3 +45,14 @@ jobs:
           name: BluHeli-unsigned-ipa
           path: BluHeli-unsigned.ipa
           if-no-files-found: error
+
+      - name: Crear GitHub Release con la IPA
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/heads/')
+        with:
+          tag_name: v4.0.0
+          name: "BluHeli Master v4 (IPA Lista para Feather)"
+          body: "IPA de BluHeli lista para firmar con Feather / AltStore / Sideloadly con protocolos Silverlit y Ferrari oficiales."
+          files: BluHeli-unsigned.ipa
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
