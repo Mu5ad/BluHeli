@@ -39,8 +39,15 @@ targets:
           - com.silverlit.speed
           - com.silverlit.bleferraricar
           - com.silverlit.btferrari
+          - com.silverlit.bluetoothrc
+          - com.silverlit.bluesky
+          - com.silverlit.rc.helicopter
+          - com.silverlit.smartlinkrc
+          - com.silverlit.smartlinkrc.helicopter
           - fi.wellmon.wECCAN
           - com.xpg.protocol
+          - com.xpg.bluecontrol
+          - com.apple.mfi
         UIBackgroundModes:
           - external-accessory
           - bluetooth-central

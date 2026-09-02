@@ -135,7 +135,7 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
 
     func mostrarPickeriOS(loguear: @escaping (String) -> Void) {
         loguear("Abriendo selector nativo de accesorios MFi de iOS...")
-        EAAccessoryManager.shared().showBluetoothAccessoryPicker(withPredicate: nil, completion: nil)
+        EAAccessoryManager.shared().showBluetoothAccessoryPicker(withNameFilter: nil, completion: nil)
     }
 
     func escanear(loguear: (String) -> Void) -> [AccInfo] {

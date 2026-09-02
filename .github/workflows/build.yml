@@ -50,9 +50,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/heads/')
         with:
-          tag_name: v4.0.0
-          name: "BluHeli Master v4 (IPA Lista para Feather)"
-          body: "IPA de BluHeli lista para firmar con Feather / AltStore / Sideloadly con protocolos Silverlit y Ferrari oficiales."
+          tag_name: "v4.${{ github.run_number }}"
+          name: "BluHeli Master v4 (Build ${{ github.run_number }})"
+          body: "IPA final de BluHeli lista para firmar con Feather con soporte completo para SL_BluTechHeli y todos los protocolos MFi."
           files: BluHeli-unsigned.ipa
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
