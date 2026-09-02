@@ -3,135 +3,9 @@ import ExternalAccessory
 import UIKit
 
 // =====================================================================
-// BLUHELI MASTER v8 — ASISTENTE INTELIGENTE TIPO MANDO UNIVERSAL
+// BLUHELI PILOT MASTER v9 — SISTEMA DE VUELO WECCAN (6 BYTES) CONFIRMADO
 // =====================================================================
 
-// MARK: - Definición de los Formatos de Trama Candidatos
-struct ProtocolCandidate: Identifiable {
-    let id: Int
-    let name: String
-    let desc: String
-    let builder: (Int, Int, Int, Int, Bool, Int) -> [UInt8] // (gas, pitch, yaw, trim, luz, match) -> bytes
-}
-
-enum ProtocolLibrary {
-    static let candidates: [ProtocolCandidate] = [
-        ProtocolCandidate(
-            id: 1,
-            name: "Formato 1: Bitmask Oficial Invertido (Little Endian)",
-            desc: "Byte 0: Luz/Trim · Byte 1: Yaw · Byte 2: Pitch · Byte 3: Gas · Byte 4: 'x'",
-            builder: { gas, pitch, yaw, trim, luz, match in
-                let h = UInt8(0x78 | ((match & 3) << 6))
-                let g = UInt8(Swift.max(0, Swift.min(128, gas)))
-                let p = UInt8(Swift.max(0, Swift.min(255, pitch)))
-                let y = UInt8(Swift.max(0, Swift.min(255, yaw)))
-                let l = UInt8(luz ? 7 : 3)
-                let lt = UInt8(((l & 7) << 5) | (UInt8(trim) & 0x1F))
-                return [lt, y, p, g, h]
-            }
-        ),
-        ProtocolCandidate(
-            id: 2,
-            name: "Formato 2: Cabecera 'x' Primero (Big Endian Oficial)",
-            desc: "Byte 0: 'x' + Match · Byte 1: Gas (0..128) · Byte 2: Pitch · Byte 3: Yaw · Byte 4: Luz/Trim",
-            builder: { gas, pitch, yaw, trim, luz, match in
-                let h = UInt8(0x78 | ((match & 3) << 6))
-                let g = UInt8(Swift.max(0, Swift.min(128, gas)))
-                let p = UInt8(Swift.max(0, Swift.min(255, pitch)))
-                let y = UInt8(Swift.max(0, Swift.min(255, yaw)))
-                let l = UInt8(luz ? 7 : 3)
-                let lt = UInt8(((l & 7) << 5) | (UInt8(trim) & 0x1F))
-                return [h, g, p, y, lt]
-            }
-        ),
-        ProtocolCandidate(
-            id: 3,
-            name: "Formato 3: Gas en Byte 4 (Layout Coche/Invertido)",
-            desc: "Byte 0: 'x' + Match · Byte 1: Luz/Trim · Byte 2: Yaw · Byte 3: Pitch · Byte 4: Gas",
-            builder: { gas, pitch, yaw, trim, luz, match in
-                let h = UInt8(0x78 | ((match & 3) << 6))
-                let g = UInt8(Swift.max(0, Swift.min(128, gas)))
-                let p = UInt8(Swift.max(0, Swift.min(255, pitch)))
-                let y = UInt8(Swift.max(0, Swift.min(255, yaw)))
-                let l = UInt8(luz ? 7 : 3)
-                let lt = UInt8(((l & 7) << 5) | (UInt8(trim) & 0x1F))
-                return [h, lt, y, p, g]
-            }
-        ),
-        ProtocolCandidate(
-            id: 4,
-            name: "Formato 4: Trama de 6 Bytes con Checksum",
-            desc: "Byte 0..4: Datos Oficiales · Byte 5: Checksum (-sum(b0..b4))",
-            builder: { gas, pitch, yaw, trim, luz, match in
-                let h = UInt8(0x78 | ((match & 3) << 6))
-                let g = UInt8(Swift.max(0, Swift.min(128, gas)))
-                let p = UInt8(Swift.max(0, Swift.min(255, pitch)))
-                let y = UInt8(Swift.max(0, Swift.min(255, yaw)))
-                let l = UInt8(luz ? 7 : 3)
-                let lt = UInt8(((l & 7) << 5) | (UInt8(trim) & 0x1F))
-                let sum = Int(h) + Int(g) + Int(p) + Int(y) + Int(lt)
-                let chk = UInt8((256 - (sum % 256)) & 0xFF)
-                return [h, g, p, y, lt, chk]
-            }
-        ),
-        ProtocolCandidate(
-            id: 5,
-            name: "Formato 5: Rango de Gas 64..128 (Offset Neutral)",
-            desc: "Byte 0: 'x' · Byte 1: Gas donde 64=cero y 128=máximo",
-            builder: { gas, pitch, yaw, trim, luz, match in
-                let h = UInt8(0x78 | ((match & 3) << 6))
-                let g = UInt8(Swift.max(64, Swift.min(128, 64 + (gas / 2))))
-                let p = UInt8(Swift.max(0, Swift.min(255, pitch)))
-                let y = UInt8(Swift.max(0, Swift.min(255, yaw)))
-                let l = UInt8(luz ? 7 : 3)
-                let lt = UInt8(((l & 7) << 5) | (UInt8(trim) & 0x1F))
-                return [h, g, p, y, lt]
-            }
-        ),
-        ProtocolCandidate(
-            id: 6,
-            name: "Formato 6: Potencia Completa Directa (0..255)",
-            desc: "Byte 0: 'x' · Byte 1: Gas escalado a 255 · Byte 2: Pitch · Byte 3: Yaw",
-            builder: { gas, pitch, yaw, trim, luz, match in
-                let h = UInt8(0x78 | ((match & 3) << 6))
-                let g = UInt8(Swift.max(0, Swift.min(255, gas * 2)))
-                let p = UInt8(Swift.max(0, Swift.min(255, pitch)))
-                let y = UInt8(Swift.max(0, Swift.min(255, yaw)))
-                let l = UInt8(luz ? 7 : 3)
-                let lt = UInt8(((l & 7) << 5) | (UInt8(trim) & 0x1F))
-                return [h, g, p, y, lt]
-            }
-        ),
-        ProtocolCandidate(
-            id: 7,
-            name: "Formato 7: Cabecera 0xB8 Fija (Banda B)",
-            desc: "Byte 0: 0xB8 · Byte 1: Gas · Byte 2: Pitch · Byte 3: Yaw · Byte 4: Luz",
-            builder: { gas, pitch, yaw, trim, luz, match in
-                let g = UInt8(Swift.max(0, Swift.min(128, gas)))
-                let p = UInt8(Swift.max(0, Swift.min(255, pitch)))
-                let y = UInt8(Swift.max(0, Swift.min(255, yaw)))
-                let l = UInt8(luz ? 0x78 : 0x38)
-                return [0xB8, g, p, y, l]
-            }
-        ),
-        ProtocolCandidate(
-            id: 8,
-            name: "Formato 8: Weccan Protocol (6 Bytes)",
-            desc: "Byte 0: Luz · Byte 1: Trim · Byte 2: Yaw · Byte 3: Pitch · Byte 4: Gas · Byte 5: Flags",
-            builder: { gas, pitch, yaw, trim, luz, match in
-                let b0 = UInt8(luz ? 0xF0 : 0x00)
-                let t = UInt8(Swift.max(0, Swift.min(32, trim)))
-                let y = UInt8(Swift.max(0, Swift.min(255, yaw)))
-                let p = UInt8(Swift.max(0, Swift.min(255, pitch)))
-                let g = UInt8(Swift.max(0, Swift.min(255, gas * 2)))
-                let flags = UInt8(((match & 3) << 6) | 0x2A)
-                return [b0, t, y, p, g, flags]
-            }
-        )
-    ]
-}
-
-// MARK: - Gestor de Comunicación MFi
 final class HeliManager: NSObject, ObservableObject, StreamDelegate {
     @Published var conectado = false
     @Published var nombreDispositivo = ""
@@ -150,6 +24,7 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(accessoryDisconnected(_:)),
                                                name: .EAAccessoryDidDisconnect, object: nil)
 
+        // Búsqueda continua de reconexión cada 1.2s
         timerAutoConnect = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { [weak self] _ in
             guard let self = self, !self.conectado else { return }
             self.buscarYConectarAuto()
@@ -161,12 +36,12 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
     }
 
     @objc private func accessoryConnected(_ notification: Notification) {
-        agregarLog("NOTIF: Accesorio MFi conectado.")
+        agregarLog("NOTIF: Helicóptero reconectado.")
         buscarYConectarAuto()
     }
 
     @objc private func accessoryDisconnected(_ notification: Notification) {
-        agregarLog("NOTIF: Accesorio desconectado.")
+        agregarLog("NOTIF: Helicóptero desconectado.")
         cerrar()
     }
 
@@ -189,9 +64,9 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
 
     func conectar(acc: EAAccessory, proto: String) -> Bool {
         cerrar()
-        agregarLog("Abriendo enlace con \(acc.name) [\(proto)]...")
+        agregarLog("Conectando con \(acc.name)...")
         guard let ses = EASession(accessory: acc, forProtocol: proto) else {
-            agregarLog("Error al abrir EASession con '\(proto)'.")
+            agregarLog("Error al abrir enlace MFi con '\(proto)'.")
             return false
         }
 
@@ -211,7 +86,7 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
         }
 
         conectado = true
-        agregarLog(">>> ¡CONECTADO A \(acc.name)! <<<")
+        agregarLog(">>> ¡CONECTADO CON ÉXITO A \(acc.name)! <<<")
         return true
     }
 
@@ -241,10 +116,10 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
     func stream(_ aStream: Stream, handle eventCode: Stream.Event) {
         switch eventCode {
         case .errorOccurred:
-            DispatchQueue.main.async { self.agregarLog("STREAM: Error de enlace.") }
+            DispatchQueue.main.async { self.agregarLog("STREAM: Error.") }
         case .endEncountered:
             DispatchQueue.main.async {
-                self.agregarLog("STREAM: Conexión cerrada.")
+                self.agregarLog("STREAM: Desconexión.")
                 self.cerrar()
             }
         default: break
@@ -258,58 +133,55 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
     }
 }
 
-// MARK: - Vista Principal
+// MARK: - Vista de Vuelo Principal
 struct ContentView: View {
     @StateObject private var mgr = HeliManager()
 
-    // Configuración persistente (guardada con UserDefaults)
-    @AppStorage("configuracionCompletada") private var configuracionCompletada = false
-    @AppStorage("canalSeleccionado") private var canalSeleccionado = 1       // 0=Rojo, 1=Verde, 2=Azul
-    @AppStorage("formatoGanadorId") private var formatoGanadorId = 1         // ID de ProtocolCandidate
+    // Configuración verificada que hizo volar el helicóptero:
+    // Canal C (Azul = Match 2), Protocolo Weccan 6-Bytes
+    @AppStorage("canalSeleccionado") private var canalSeleccionado = 2 // Canal C (Azul)
+    @AppStorage("calibracionGuardada") private var calibracionGuardada = true
 
-    // Estado del Asistente (Wizard)
-    @State private var pasoWizard = 1 // 1=Color/Canal, 2=Motores, 3=Confirmación
-    @State private var indiceCandidatoActual = 0
-    @State private var probandoCodigo = false
-    @State private var temporizadorPrueba = 0.0
-
-    // Mandos de Vuelo Cockpit
-    @State private var gas: Double = 0.0
-    @State private var pitch: Double = 127.0
-    @State private var yaw: Double = 127.0
-    @State private var trim: Int = 10
+    // Mandos de Vuelo Proporcionales (0..100%)
+    @State private var porcentajeGas: Double = 0.0  // 0% a 100%
+    @State private var pitch: Double = 127.0        // 0..255 (127 neutro)
+    @State private var yaw: Double = 127.0          // 0..255 (127 neutro)
+    @State private var trim: Int = 16               // 0..32 (16 neutro de i737)
     @State private var luces = true
-    @State private var capSeguro = true
-    @State private var modoVueloLibre = false
-    @State private var rutinaEnCurso = false
+    @State private var limiteSeguridad = true       // Limita a 65% para que no se estampe contra el techo
+    @State private var maniobraEnCurso = false
 
-    var candidatoActual: ProtocolCandidate {
-        ProtocolLibrary.candidates[indiceCandidatoActual]
+    // Generador de Trama Weccan 6-Bytes Verificada
+    func construirTramaWeccan(gasPct: Double, pitchVal: Double, yawVal: Double, trimVal: Int, luzVal: Bool, match: Int) -> [UInt8] {
+        let b0: UInt8 = luzVal ? 0xF0 : 0x00
+        let t = UInt8(Swift.max(0, Swift.min(32, trimVal)))
+        let y = UInt8(Swift.max(0, Swift.min(255, Int(yawVal))))
+        let p = UInt8(Swift.max(0, Swift.min(255, Int(pitchVal))))
+        
+        // Mapeo suave de potencia del rotor (0..255):
+        // Con límite de seguridad: máximo 140 de 255 (~55% de empuje) para vuelo suave en salón
+        let maxPotencia = limiteSeguridad ? 140.0 : 220.0
+        let rotorPotencia = gasPct > 0 ? (gasPct / 100.0) * maxPotencia : 0.0
+        let g = UInt8(Swift.max(0, Swift.min(255, Int(rotorPotencia))))
+        
+        // Flags: Match en bits 6..7, 0x2A en bits 0..5
+        let flags = UInt8(((match & 3) << 6) | 0x2A)
+        return [b0, t, y, p, g, flags]
     }
 
-    var candidatoGanador: ProtocolCandidate {
-        ProtocolLibrary.candidates.first(where: { $0.id == formatoGanadorId }) ?? ProtocolLibrary.candidates[0]
-    }
-
-    var tramaActualVuelo: [UInt8] {
-        let g = capSeguro ? Swift.min(Int(gas), 85) : Int(gas)
-        return candidatoGanador.builder(g, Int(pitch), Int(yaw), trim, luces, canalSeleccionado)
+    var tramaActual: [UInt8] {
+        construirTramaWeccan(gasPct: porcentajeGas, pitchVal: pitch, yawVal: yaw,
+                             trimVal: trim, luzVal: luces, match: canalSeleccionado)
     }
 
     var body: some View {
         TabView {
-            if !configuracionCompletada {
-                asistenteTab.tabItem {
-                    Label("Configurar", systemImage: "wand.and.stars")
-                }
-            } else {
-                cockpitTab.tabItem {
-                    Label("Vuelo", systemImage: "airplane")
-                }
+            cockpitTab.tabItem {
+                Label("Cabina", systemImage: "airplane.circle.fill")
             }
 
             ajustesTab.tabItem {
-                Label("Ajustes", systemImage: "slider.horizontal.3")
+                Label("Ajustes", systemImage: "gearshape.fill")
             }
 
             consolaTab.tabItem {
@@ -317,202 +189,85 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            mgr.agregarLog("BluHeli Universal Wizard Iniciado.")
+            mgr.agregarLog("BluHeli Pilot Iniciado. Conectando por Canal C (Azul)...")
             mgr.buscarYConectarAuto()
-            iniciarBucleVuelo()
+            iniciarBucleTransmisionConstante()
         }
     }
 
     // =================================================================
-    // TAB 1: ASISTENTE TIPO MANDO UNIVERSAL (Paso a Paso "¿Funciona? Sí/No")
-    // =================================================================
-    var asistenteTab: some View {
-        NavigationView {
-            Form {
-                Section("Estado del Enlace") {
-                    HStack {
-                        Circle().fill(mgr.conectado ? Color.green : Color.red).frame(width: 14, height: 14)
-                        Text(mgr.conectado ? "CONECTADO: \(mgr.nombreDispositivo)" : "BUSCANDO HELICÓPTERO...").bold()
-                        Spacer()
-                        Text("\(mgr.framesEnviados) tramas").font(.caption).foregroundColor(.secondary)
-                    }
-                }
-
-                if pasoWizard == 1 {
-                    // PASO 1: DETECCIÓN DE COLOR / BANDA
-                    Section(header: Text("PASO 1 DE 2: IDENTIFICAR CANAL POR COLOR").bold()) {
-                        Text("Elige un canal y pulsa 'Comprobar Color'. Mira de qué color se encienden las luces del helicóptero.")
-                            .font(.footnote)
-                            .foregroundColor(.secondary)
-
-                        Picker("Canal a Probar", selection: $canalSeleccionado) {
-                            Text("🔴 Canal A (LED Rojo)").tag(0)
-                            Text("🟢 Canal B (LED Verde)").tag(1)
-                            Text("🔵 Canal C (LED Azul)").tag(2)
-                        }
-                        .pickerStyle(.segmented)
-
-                        Button(action: { comprobarColorCanal(canalSeleccionado) }) {
-                            HStack {
-                                Spacer()
-                                Image(systemName: "lightbulb.fill").foregroundColor(.yellow)
-                                Text("COMPROBAR CANAL \(nombreCanal(canalSeleccionado).uppercased())")
-                                    .bold()
-                                Spacer()
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("¿El helicóptero se ha iluminado con este canal?").font(.subheadline).bold()
-                            HStack {
-                                Button("SÍ, ES ESTE COLOR ✅") {
-                                    mgr.agregarLog("Canal \(nombreCanal(canalSeleccionado)) confirmado por el usuario.")
-                                    pasoWizard = 2
-                                    indiceCandidatoActual = 0
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(.green)
-
-                                Spacer()
-
-                                Button("PROBAR OTRO CANAL 🔄") {
-                                    canalSeleccionado = (canalSeleccionado + 1) % 3
-                                    comprobarColorCanal(canalSeleccionado)
-                                }
-                                .buttonStyle(.bordered)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                } else if pasoWizard == 2 {
-                    // PASO 2: PRUEBA DE CÓDIGOS DE MOTOR (¿Hélices giraron? Sí / No)
-                    Section(header: Text("PASO 2 DE 2: SINTONIZAR MOTOR (CÓDIGO \(indiceCandidatoActual + 1) DE \(ProtocolLibrary.candidates.count))").bold()) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(candidatoActual.name).bold().foregroundColor(.primary)
-                            Text(candidatoActual.desc).font(.caption).foregroundColor(.secondary)
-                        }
-
-                        Button(action: { probarCodigoMotorActual() }) {
-                            HStack {
-                                Spacer()
-                                if probandoCodigo {
-                                    ProgressView().tint(.white).padding(.trailing, 4)
-                                    Text("PROBANDO MOTOR AHORA...").bold()
-                                } else {
-                                    Image(systemName: "bolt.fill").foregroundColor(.yellow)
-                                    Text("PROBAR ESTE CÓDIGO (GAS 95)").bold()
-                                }
-                                Spacer()
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(probandoCodigo ? .orange : .blue)
-                        .disabled(probandoCodigo || !mgr.conectado)
-
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("¿HAN GIRADO LAS HÉLICES?").font(.headline).bold()
-
-                            HStack(spacing: 16) {
-                                Button(action: {
-                                    // SÍ -> Guardar configuración y pasar a vuelo
-                                    formatoGanadorId = candidatoActual.id
-                                    configuracionCompletada = true
-                                    mgr.agregarLog("¡CALIBRACIÓN EXITOSA! Guardado Formato \(candidatoActual.id).")
-                                }) {
-                                    HStack {
-                                        Spacer()
-                                        Image(systemName: "checkmark.circle.fill")
-                                        Text("SÍ, ¡HAN GIRADO!").bold()
-                                        Spacer()
-                                    }
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(.green)
-
-                                Button(action: {
-                                    // NO -> Pasar al siguiente código
-                                    if indiceCandidatoActual < ProtocolLibrary.candidates.count - 1 {
-                                        indiceCandidatoActual += 1
-                                        mgr.agregarLog("Probando siguiente candidato: Código \(indiceCandidatoActual + 1)...")
-                                    } else {
-                                        indiceCandidatoActual = 0
-                                        mgr.agregarLog("Reiniciando ciclo de códigos...")
-                                    }
-                                }) {
-                                    HStack {
-                                        Spacer()
-                                        Image(systemName: "xmark.circle")
-                                        Text("NO, SIGUIENTE").bold()
-                                        Spacer()
-                                    }
-                                }
-                                .buttonStyle(.bordered)
-                                .tint(.red)
-                            }
-                        }
-                        .padding(.vertical, 8)
-                    }
-                }
-            }
-            .navigationTitle("Asistente Universal")
-        }
-    }
-
-    // =================================================================
-    // TAB 1 (Alternativo): COCKPIT DE VUELO DEFINITIVO
+    // TAB 1: CABINA DE VUELO (COCKPIT)
     // =================================================================
     var cockpitTab: some View {
         NavigationView {
             Form {
-                Section("Estado de Vuelo") {
+                // Estado del enlace
+                Section {
                     HStack {
                         Circle().fill(mgr.conectado ? Color.green : Color.red).frame(width: 14, height: 14)
                         VStack(alignment: .leading) {
-                            Text(mgr.conectado ? "LISTO PARA VOLAR (\(candidatoGanador.name))" : "DESCONECTADO").bold()
-                            Text("Canal: \(nombreCanal(canalSeleccionado))").font(.caption2).foregroundColor(.secondary)
+                            Text(mgr.conectado ? "CONECTADO A SL_BLUTECH" : "BUSCANDO HELICÓPTERO...").bold()
+                            Text("Protocolo: Weccan 6B (Verificado) · Canal C (Azul)").font(.caption2).foregroundColor(.secondary)
                         }
                         Spacer()
-                        Button("Re-calibrar") {
-                            configuracionCompletada = false
-                            pasoWizard = 1
-                        }
-                        .font(.caption)
+                        Text("\(mgr.framesEnviados) tx").font(.caption).foregroundColor(.secondary)
                     }
                 }
 
-                Section("Potencia (Acelerador)") {
-                    VStack(alignment: .leading, spacing: 6) {
+                // Control del Acelerador
+                Section(header: Text("ACELERADOR PRINCIPAL (GAS)").bold()) {
+                    VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text("GAS (Potencia)").bold()
+                            Text("POTENCIA").bold()
                             Spacer()
-                            Text("\(Int((gas / 128.0) * 100))% (\(Int(gas))/128)")
-                                .font(.headline)
-                                .foregroundColor(gas > 0 ? .green : .secondary)
+                            Text("\(Int(porcentajeGas))%")
+                                .font(.title2)
+                                .bold()
+                                .foregroundColor(porcentajeGas > 0 ? (porcentajeGas > 60 ? .orange : .green) : .secondary)
                         }
-                        Slider(value: $gas, in: 0...128, step: 1)
-                            .tint(gas > 0 ? .green : .gray)
+
+                        Slider(value: $porcentajeGas, in: 0...100, step: 1)
+                            .tint(porcentajeGas > 0 ? .green : .gray)
+
+                        Toggle("🛡 Modo Interior / Techo (Potencia máx 60%)", isOn: $limiteSeguridad)
+                            .tint(.orange)
+                            .font(.footnote)
                     }
 
-                    HStack {
-                        Button("🛫 Despegue Suave (70%)") { ejecutarDespegueSuave() }
-                            .buttonStyle(.bordered)
-                            .tint(.green)
-                            .disabled(rutinaEnCurso)
+                    // Botones de Despegue y Aterrizaje Asistido
+                    HStack(spacing: 12) {
+                        Button(action: { despegueSuaveAutomatico() }) {
+                            HStack {
+                                Spacer()
+                                Image(systemName: "arrow.up.circle.fill")
+                                Text("DESPEGAR (Hover 45%)").bold()
+                                Spacer()
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.green)
+                        .disabled(maniobraEnCurso || !mgr.conectado)
 
-                        Spacer()
-
-                        Button("🛬 Aterrizar") { ejecutarAterrizajeSuave() }
-                            .buttonStyle(.bordered)
-                            .tint(.blue)
-                            .disabled(gas == 0 || rutinaEnCurso)
+                        Button(action: { aterrizajeSuaveAutomatico() }) {
+                            HStack {
+                                Spacer()
+                                Image(systemName: "arrow.down.circle.fill")
+                                Text("ATERRIZAR").bold()
+                                Spacer()
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.blue)
+                        .disabled(porcentajeGas == 0 || maniobraEnCurso)
                     }
+                    .padding(.vertical, 4)
                 }
 
-                Section("Dirección (Pitch / Yaw / Trim)") {
+                // Mandos de Dirección y Estabilidad
+                Section(header: Text("DIRECCIÓN Y ESTABILIZACIÓN").bold()) {
                     VStack(alignment: .leading) {
                         HStack {
-                            Text("PITCH (Adelante/Atrás)").bold()
+                            Text("PITCH (Adelante / Atrás)").bold()
                             Spacer()
                             Text("\(Int(pitch))").font(.caption)
                         }
@@ -521,7 +276,7 @@ struct ContentView: View {
 
                     VStack(alignment: .leading) {
                         HStack {
-                            Text("YAW (Giro de Cola)").bold()
+                            Text("YAW (Giro Izquierda / Derecha)").bold()
                             Spacer()
                             Text("\(Int(yaw))").font(.caption)
                         }
@@ -529,22 +284,31 @@ struct ContentView: View {
                     }
 
                     HStack {
-                        Picker("Trim", selection: $trim) {
-                            ForEach(0..<21) { Text("\($0)").tag($0) }
-                        }.pickerStyle(.menu)
+                        Picker("Trim (Estabilizador)", selection: $trim) {
+                            ForEach(0..<33) { Text("\($0)").tag($0) }
+                        }
+                        .pickerStyle(.menu)
 
                         Spacer()
 
-                        Toggle("Luces", isOn: $luces).tint(.yellow)
+                        Toggle("Faros LED", isOn: $luces).tint(.yellow)
                     }
+
+                    Button("🎯 Centrar Dirección y Timón") {
+                        pitch = 127.0
+                        yaw = 127.0
+                        trim = 16
+                    }
+                    .font(.footnote)
                 }
 
+                // Botón Rojo de Parada de Emergencia
                 Section {
-                    Button(action: { paradaEmergencia() }) {
+                    Button(action: { paradaEmergenciaInmediata() }) {
                         HStack {
                             Spacer()
-                            Image(systemName: "stop.circle.fill")
-                            Text("PARADA DE EMERGENCIA (STOP)").bold()
+                            Image(systemName: "stop.circle.fill").font(.title3)
+                            Text("CORTE DE MOTOR INMEDIATO (STOP)").font(.headline).bold()
                             Spacer()
                         }
                     }
@@ -552,12 +316,13 @@ struct ContentView: View {
                     .tint(.red)
                 }
 
+                // Telemetría en vivo
                 Section {
                     HStack {
-                        Text("TRAMA VUELO:")
+                        Text("TRAMA EN VIVO:")
                             .font(.caption2).foregroundColor(.secondary)
                         Spacer()
-                        Text(tramaActualVuelo.map { String(format: "%02X", $0) }.joined(separator: " "))
+                        Text(tramaActual.map { String(format: "%02X", $0) }.joined(separator: " "))
                             .font(.system(.footnote, design: .monospaced))
                             .bold()
                             .foregroundColor(.blue)
@@ -569,37 +334,33 @@ struct ContentView: View {
     }
 
     // =================================================================
-    // TAB 2: AJUSTES MANUALES
+    // TAB 2: AJUSTES & CANALES
     // =================================================================
     var ajustesTab: some View {
         NavigationView {
             Form {
-                Section("Configuración Guardada") {
-                    Picker("Canal / Banda", selection: $canalSeleccionado) {
+                Section("Canal de Vuelo") {
+                    Picker("Banda Sintonizada", selection: $canalSeleccionado) {
                         Text("🔴 Canal A (Rojo)").tag(0)
                         Text("🟢 Canal B (Verde)").tag(1)
-                        Text("🔵 Canal C (Azul)").tag(2)
+                        Text("🔵 Canal C (Azul - VERIFICADO)").tag(2)
                     }
-
-                    Picker("Perfil de Protocolo", selection: $formatoGanadorId) {
-                        ForEach(ProtocolLibrary.candidates) { c in
-                            Text(c.name).tag(c.id)
-                        }
-                    }
-
-                    Toggle("Modo Seguro (Gas máx 85)", isOn: $capSeguro).tint(.orange)
+                    .pickerStyle(.segmented)
+                    Text("Tu helicóptero respondió con el Canal C (LED Azul).").font(.caption).foregroundColor(.secondary)
                 }
 
-                Section("Acciones Rápidas") {
-                    Button("🔄 Reiniciar Asistente de Configuración") {
-                        configuracionCompletada = false
-                        pasoWizard = 1
-                        indiceCandidatoActual = 0
+                Section("Prueba Rápida de Motores (2 Segundos)") {
+                    Button("⚡ Pulso de Prueba al 35% de Gas (En Mano)") {
+                        pulsoPruebaSeguro(35.0)
                     }
-                    .foregroundColor(.orange)
+                    Button("⚡ Pulso de Prueba al 50% de Gas (En Mano)") {
+                        pulsoPruebaSeguro(50.0)
+                    }
+                }
 
-                    Button("🛑 Parada Total Inmediata") {
-                        paradaEmergencia()
+                Section("Acciones de Seguridad") {
+                    Button("🛑 Corte de Motor (Gas a 0)") {
+                        paradaEmergenciaInmediata()
                     }
                     .foregroundColor(.red)
                 }
@@ -609,19 +370,19 @@ struct ContentView: View {
     }
 
     // =================================================================
-    // TAB 3: CONSOLA Y LOGS
+    // TAB 3: CONSOLA
     // =================================================================
     var consolaTab: some View {
         NavigationView {
             Form {
-                Section("Registro de Operaciones") {
+                Section("Registro de Enlace") {
                     TextEditor(text: $mgr.log)
                         .font(.system(.caption, design: .monospaced))
                         .frame(minHeight: 350)
                     HStack {
                         Button("Copiar Registro") {
                             UIPasteboard.general.string = mgr.log
-                            mgr.agregarLog("Log copiado al portapapeles.")
+                            mgr.agregarLog("Copiado al portapapeles.")
                         }
                         Spacer()
                         Button("Limpiar") { mgr.log = "" }.foregroundColor(.red)
@@ -633,106 +394,69 @@ struct ContentView: View {
     }
 
     // =================================================================
-    // FUNCIONES DEL ASISTENTE Y VUELO
+    // MOTOR DE CONTROL Y SEGURIDAD
     // =================================================================
-    func nombreCanal(_ m: Int) -> String {
-        switch m {
-        case 0: return "Rojo (A)"
-        case 1: return "Verde (B)"
-        case 2: return "Azul (C)"
-        default: return "m\(m)"
-        }
-    }
 
-    func iniciarBucleVuelo() {
+    // Transmisión continua a 20 Hz constante SIEMPRE para que el heli NUNCA quede colgado acelerando
+    func iniciarBucleTransmisionConstante() {
         Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
-            if mgr.conectado && configuracionCompletada && !probandoCodigo && !rutinaEnCurso {
-                _ = mgr.enviarTrama(tramaActualVuelo)
+            if mgr.conectado {
+                _ = mgr.enviarTrama(tramaActual)
             }
         }
     }
 
-    func comprobarColorCanal(_ canal: Int) {
-        mgr.agregarLog("Probando sincronización en Canal \(nombreCanal(canal))...")
-        // Enviar 10 tramas rápidas para iluminar los LEDs en el canal seleccionado
-        for _ in 0..<10 {
-            let pkt = candidatoActual.builder(0, 127, 127, 10, true, canal)
-            _ = mgr.enviarTrama(pkt)
-        }
-    }
-
-    func probarCodigoMotorActual() {
-        probandoCodigo = true
-        let cand = candidatoActual
-        let canal = canalSeleccionado
-        mgr.agregarLog("=== PROBANDO: \(cand.name) ===")
-        mgr.agregarLog("1. Armado ESC (Gas 0 por 1.2s)...")
-
-        var tick = 0
-        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { t in
-            tick += 1
-            if tick <= 24 {
-                // Fase 1: Armado en Gas = 0 (1.2s)
-                let pkt = cand.builder(0, 127, 127, 10, true, canal)
-                _ = self.mgr.enviarTrama(pkt)
-            } else if tick <= 65 {
-                // Fase 2: Impulso de motor en Gas = 95 (2.0s)
-                if tick == 25 { self.mgr.agregarLog("2. ¡POTENCIA A MOTORES (Gas 95)!...") }
-                let pkt = cand.builder(95, 127, 127, 10, true, canal)
-                _ = self.mgr.enviarTrama(pkt)
-            } else {
-                // Fase 3: Detener
-                t.invalidate()
-                let stopPkt = cand.builder(0, 127, 127, 10, true, canal)
-                _ = self.mgr.enviarTrama(stopPkt)
-                self.probandoCodigo = false
-                self.mgr.agregarLog("Fin de prueba de \(cand.name). ¿Han girado las hélices?")
-            }
-        }
-    }
-
-    func ejecutarDespegueSuave() {
-        rutinaEnCurso = true
-        mgr.agregarLog("Despegue suave automático...")
+    func despegueSuaveAutomatico() {
+        maniobraEnCurso = true
+        mgr.agregarLog("Iniciando despegue suave...")
+        porcentajeGas = 0.0
         var paso = 0
-        Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { t in
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { t in
             paso += 1
-            self.gas = Swift.min(85.0, Double(paso * 4))
-            let pkt = self.candidatoGanador.builder(Int(self.gas), 127, 127, self.trim, self.luces, self.canalSeleccionado)
-            _ = self.mgr.enviarTrama(pkt)
-            if self.gas >= 85.0 {
+            porcentajeGas = Swift.min(48.0, Double(paso * 4))
+            if porcentajeGas >= 48.0 {
                 t.invalidate()
-                self.rutinaEnCurso = false
-                self.mgr.agregarLog("Despegue estabilizado.")
+                maniobraEnCurso = false
+                mgr.agregarLog("Despegue estabilizado a 48% (Hover).")
             }
         }
     }
 
-    func ejecutarAterrizajeSuave() {
-        rutinaEnCurso = true
-        mgr.agregarLog("Aterrizando...")
-        Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { t in
-            self.gas = Swift.max(0.0, self.gas - 3.0)
-            let pkt = self.candidatoGanador.builder(Int(self.gas), 127, 127, self.trim, self.luces, self.canalSeleccionado)
-            _ = self.mgr.enviarTrama(pkt)
-            if self.gas <= 0.0 {
+    func aterrizajeSuaveAutomatico() {
+        maniobraEnCurso = true
+        mgr.agregarLog("Iniciando aterrizaje suave...")
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { t in
+            porcentajeGas = Swift.max(0.0, porcentajeGas - 3.0)
+            if porcentajeGas <= 0.0 {
                 t.invalidate()
-                self.gas = 0.0
-                self.rutinaEnCurso = false
-                self.mgr.agregarLog("Aterrizaje completado. Motor detenido.")
+                porcentajeGas = 0.0
+                maniobraEnCurso = false
+                mgr.agregarLog("Aterrizado. Motor detenido.")
             }
         }
     }
 
-    func paradaEmergencia() {
-        rutinaEnCurso = false
-        probandoCodigo = false
-        gas = 0.0
+    func paradaEmergenciaInmediata() {
+        maniobraEnCurso = false
+        porcentajeGas = 0.0
         pitch = 127.0
         yaw = 127.0
-        let stopPkt = candidatoGanador.builder(0, 127, 127, trim, luces, canalSeleccionado)
-        _ = mgr.enviarTrama(stopPkt)
-        mgr.agregarLog("🛑 PARADA DE EMERGENCIA EJECUTADA: Motores a 0.")
+        // Enviar ráfaga inmediata de tramas a Gas = 0
+        for _ in 0..<10 {
+            _ = mgr.enviarTrama(construirTramaWeccan(gasPct: 0, pitchVal: 127, yawVal: 127, trimVal: trim, luzVal: luces, match: canalSeleccionado))
+        }
+        mgr.agregarLog("🛑 PARADA DE EMERGENCIA: Motor cortado a 0%.")
+    }
+
+    func pulsoPruebaSeguro(_ potencia: Double) {
+        maniobraEnCurso = true
+        mgr.agregarLog("Prueba segura a \(Int(potencia))% de potencia por 2s...")
+        porcentajeGas = potencia
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            self.porcentajeGas = 0.0
+            self.maniobraEnCurso = false
+            self.mgr.agregarLog("Fin de prueba. Motor a 0%.")
+        }
     }
 }
 
