@@ -3,182 +3,94 @@ import ExternalAccessory
 import UIKit
 
 // =====================================================================
-// BLUHELI MASTER v4 — MANDO DEFINITIVO SILVERLIT / WECCAN PARA iOS
+// BLU-TECH HELI v5 (OFFICIAL PROTOCOL DATA & AUTHENTIC MFi STRINGS)
 // =====================================================================
 
-struct ByteField {
-    let desc: String
-    let index: Int
-    let shift: Int
-    let mask: UInt8
-    let max: Int
-    let mid: Int
-}
-
-struct ProtoProfile: Identifiable {
-    let id = UUID()
-    let name: String
-    let byteTotal: Int
-    let headerByte: UInt8?
-    let reverse: Bool
-    let fields: [ByteField]
-
-    func field(contiene: String) -> ByteField? {
-        fields.first { $0.desc.lowercased().contains(contiene) }
-    }
-
-    func build(gas: Int? = nil, pitch: Int? = nil, yaw: Int? = nil,
-               trim: Int? = nil, luz: Int? = nil, match: Int? = nil) -> [UInt8] {
-        var out = [UInt8](repeating: 0, count: byteTotal)
-        if let h = headerByte { out[0] = h }
-        
-        var vals: [(String, Int)] = []
-        if let v = match { vals.append(("match", v)) }
-        if let v = gas { vals.append(("rotor", v)) }
-        if let v = pitch { vals.append(("pitch", v)) }
-        if let v = yaw { vals.append(("yaw", v)) }
-        if let v = trim { vals.append(("trim", v)) }
-        if let v = luz { vals.append(("light", v)) }
-
-        for (canal, valor) in vals {
-            guard let f = field(contiene: canal) else { continue }
-            let clamped = Swift.max(0, Swift.min(f.max, valor))
-            let bits = (UInt8(clamped) << f.shift) & f.mask
-            out[f.index] |= bits
-        }
-        return out
-    }
-
-    var resumen: String {
-        "\(byteTotal) bytes · header: \(headerByte.map { String(format: "0x%02X", $0) } ?? "none") · campos: \(fields.map(\.desc).joined(separator: ", "))"
-    }
-}
-
-enum Perfiles {
-    static let silverlitHeli = ProtoProfile(
-        name: "Silverlit Helicopter (APPS_airplane) — OFICIAL",
-        byteTotal: 5, headerByte: 0x78, reverse: false,
-        fields: [
-            ByteField(desc: "matchByte", index: 0, shift: 6, mask: 0xC0, max: 3, mid: 1),
-            ByteField(desc: "rotorByte", index: 1, shift: 0, mask: 0x7F, max: 128, mid: 64),
-            ByteField(desc: "pitchByte", index: 2, shift: 0, mask: 0xFF, max: 255, mid: 127),
-            ByteField(desc: "yawByte", index: 3, shift: 0, mask: 0xFF, max: 255, mid: 127),
-            ByteField(desc: "trimerByte", index: 4, shift: 0, mask: 0x0F, max: 15, mid: 8),
-            ByteField(desc: "lightByte", index: 4, shift: 4, mask: 0xF0, max: 7, mid: 3),
-        ])
-
-    static let btferrari = ProtoProfile(
-        name: "Silverlit BTFerrari (APPS_Car)",
-        byteTotal: 5, headerByte: 0x72, reverse: true,
-        fields: [
-            ByteField(desc: "matchByte", index: 4, shift: 6, mask: 0xC0, max: 3, mid: 1),
-            ByteField(desc: "rotorByte", index: 3, shift: 0, mask: 0xFF, max: 255, mid: 127),
-            ByteField(desc: "pitchByte", index: 2, shift: 0, mask: 0xFF, max: 255, mid: 127),
-            ByteField(desc: "yawByte", index: 1, shift: 0, mask: 0xFF, max: 255, mid: 127),
-            ByteField(desc: "trimerByte", index: 0, shift: 0, mask: 0x0F, max: 15, mid: 7),
-            ByteField(desc: "lightByte", index: 0, shift: 4, mask: 0xF0, max: 15, mid: 7),
-        ])
-
-    static let weccanI737 = ProtoProfile(
-        name: "WeCCAN i737 (6B)",
-        byteTotal: 6, headerByte: nil, reverse: true,
-        fields: [
-            ByteField(desc: "unknownByte", index: 0, shift: 0, mask: 0x0F, max: 15, mid: 8),
-            ByteField(desc: "fightByte", index: 0, shift: 4, mask: 0xF0, max: 15, mid: 8),
-            ByteField(desc: "trimerByte", index: 1, shift: 0, mask: 0xFF, max: 32, mid: 16),
-            ByteField(desc: "yawByte", index: 2, shift: 0, mask: 0xFF, max: 255, mid: 127),
-            ByteField(desc: "pitchByte", index: 3, shift: 0, mask: 0xFF, max: 255, mid: 127),
-            ByteField(desc: "rotorByte", index: 4, shift: 0, mask: 0xFF, max: 255, mid: 127),
-            ByteField(desc: "matchByte", index: 5, shift: 6, mask: 0xC0, max: 3, mid: 2),
-        ])
-
-    static let todos = [silverlitHeli, btferrari, weccanI737]
-}
-
-// MARK: - Gestor de Comunicación MFi (ExternalAccessory)
-
 final class HeliManager: NSObject, ObservableObject, StreamDelegate {
-    @Published var accesorios: [AccInfo] = []
     @Published var conectado = false
+    @Published var nombreDispositivo = ""
     @Published var protoActivo = ""
     @Published var log = ""
     @Published var framesEnviados = 0
-
-    struct AccInfo: Identifiable, Hashable {
-        let id: Int
-        let nombre: String
-        let fabricante: String
-        let protocolos: [String]
-    }
+    @Published var bateriaInfo = "OK"
 
     private var session: EASession?
+    private var timerAutoConnect: Timer?
 
     override init() {
         super.init()
         EAAccessoryManager.shared().registerForLocalNotifications()
-        NotificationCenter.default.addObserver(self, selector: #selector(accessoryDidConnect(_:)),
+        NotificationCenter.default.addObserver(self, selector: #selector(accessoryConnected(_:)),
                                                name: .EAAccessoryDidConnect, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(accessoryDidDisconnect(_:)),
+        NotificationCenter.default.addObserver(self, selector: #selector(accessoryDisconnected(_:)),
                                                name: .EAAccessoryDidDisconnect, object: nil)
+        
+        // Iniciar timer de auto-búsqueda cada 1.5s
+        timerAutoConnect = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            guard let self = self, !self.conectado else { return }
+            self.buscarYConectarAuto()
+        }
     }
 
-    @objc private func accessoryDidConnect(_ notification: Notification) {
-        agregarLog("NOTIF: Accesorio MFi conectado a iOS!")
-        _ = escanear { self.agregarLog($0) }
+    deinit {
+        timerAutoConnect?.invalidate()
     }
 
-    @objc private func accessoryDidDisconnect(_ notification: Notification) {
-        agregarLog("NOTIF: Accesorio MFi desconectado de iOS.")
+    @objc private func accessoryConnected(_ notification: Notification) {
+        agregarLog("NOTIF iOS: Accesorio Bluetooth MFi conectado!")
+        buscarYConectarAuto()
+    }
+
+    @objc private func accessoryDisconnected(_ notification: Notification) {
+        agregarLog("NOTIF iOS: Accesorio desconectado.")
         cerrar()
-        _ = escanear { self.agregarLog($0) }
     }
 
-    func mostrarPickeriOS(loguear: @escaping (String) -> Void) {
-        loguear("Abriendo selector nativo de accesorios MFi de iOS...")
+    func abrirSelectorBluetooth() {
+        agregarLog("Abriendo selector Bluetooth MFi de iOS...")
         EAAccessoryManager.shared().showBluetoothAccessoryPicker(withNameFilter: nil, completion: nil)
     }
 
-    func escanear(loguear: (String) -> Void) -> [AccInfo] {
-        let lista = EAAccessoryManager.shared().connectedAccessories.map { acc in
-            AccInfo(id: acc.connectionID, nombre: acc.name, fabricante: acc.manufacturer,
-                    protocolos: acc.protocolStrings)
+    func buscarYConectarAuto() {
+        let accesorios = EAAccessoryManager.shared().connectedAccessories
+        if accesorios.isEmpty {
+            return
         }
-        accesorios = lista
-        if lista.isEmpty {
-            loguear("SCAN: No se detectan accesorios MFi conectados aún.")
-        } else {
-            for a in lista {
-                loguear("SCAN: Detectado \(a.nombre) [\(a.fabricante)] -> Protocolos: \(a.protocolos.joined(separator: ", "))")
+
+        for acc in accesorios {
+            agregarLog("Detectado: \(acc.name) [\(acc.manufacturer)] - Protocolos: \(acc.protocolStrings.joined(separator: ", "))")
+            
+            // Prioridad: com.issc.datapath o com.silverlit.datapath
+            let candidatos = ["com.issc.datapath", "com.silverlit.datapath", "com.silverlit.helicopter", "com.silverlit.ferrari"]
+            for proto in candidatos {
+                if acc.protocolStrings.contains(proto) {
+                    if conectar(acc: acc, proto: proto) {
+                        return
+                    }
+                }
+            }
+            
+            // Si tiene cualquier otro protocolo anunciado
+            if let primerProto = acc.protocolStrings.first {
+                if conectar(acc: acc, proto: primerProto) {
+                    return
+                }
             }
         }
-        return lista
     }
 
-    func autoConectar(loguear: @escaping (String) -> Void) -> Bool {
-        let lista = escanear(loguear: loguear)
-        guard let heli = lista.first(where: { $0.nombre.lowercased().contains("heli") || $0.nombre.lowercased().contains("silverlit") }) ?? lista.first else {
-            loguear("AUTO: Sin accesorios para conectar.")
+    func conectar(acc: EAAccessory, proto: String) -> Bool {
+        cerrar()
+        agregarLog("Intentando abrir EASession con \(acc.name) [\(proto)]...")
+        guard let ses = EASession(accessory: acc, forProtocol: proto) else {
+            agregarLog("Error: iOS rechazó EASession para '\(proto)'.")
             return false
         }
-        guard let proto = heli.protocolos.first else {
-            loguear("AUTO: El accesorio no tiene protocolo expuesto.")
-            return false
-        }
-        return conectar(acc: heli, proto: proto, loguear: loguear)
-    }
 
-    func conectar(acc: AccInfo, proto: String, loguear: @escaping (String) -> Void) -> Bool {
-        cerrar(loguear: loguear)
-        guard let ea = EAAccessoryManager.shared().connectedAccessories.first(where: { $0.connectionID == acc.id }) else {
-            loguear("CONN: Error, el accesorio no está conectado en iOS.")
-            return false
-        }
-        guard let ses = EASession(accessory: ea, forProtocol: proto) else {
-            loguear("CONN: iOS rechazó EASession para protocolo '\(proto)'.")
-            return false
-        }
         session = ses
+        nombreDispositivo = acc.name
         protoActivo = proto
+
         if let inp = ses.inputStream {
             inp.delegate = self
             inp.schedule(in: .main, forMode: .default)
@@ -189,43 +101,45 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
             out.schedule(in: .main, forMode: .default)
             out.open()
         }
+
         conectado = true
-        loguear("¡CONECTADO con éxito a \(acc.nombre) [\(proto)]!")
+        agregarLog(">>> ¡CONECTADO CON ÉXITO A \(acc.name)! <<<")
         return true
     }
 
-    func cerrar(loguear: (String) -> Void = { _ in }) {
+    func cerrar() {
         if let ses = session {
             ses.inputStream?.close()
             ses.outputStream?.close()
             ses.inputStream?.remove(from: .main, forMode: .default)
             ses.outputStream?.remove(from: .main, forMode: .default)
-            loguear("Sesión cerrada.")
         }
         session = nil
         conectado = false
-        framesEnviados = 0
+        nombreDispositivo = ""
+        protoActivo = ""
     }
 
-    func enviar(_ bytes: [UInt8], loguear: @escaping (String) -> Void) -> Bool {
+    func enviarTrama(_ bytes: [UInt8]) -> Bool {
         guard let out = session?.outputStream, out.hasSpaceAvailable else {
             return false
         }
-        let ok = out.write(bytes, maxLength: bytes.count) == bytes.count
-        if ok {
+        let n = out.write(bytes, maxLength: bytes.count)
+        if n == bytes.count {
             framesEnviados += 1
+            return true
         }
-        return ok
+        return false
     }
 
     func stream(_ aStream: Stream, handle eventCode: Stream.Event) {
         switch eventCode {
         case .errorOccurred:
-            DispatchQueue.main.async { self.agregarLog("STREAM: Error en comunicación.") }
+            DispatchQueue.main.async { self.agregarLog("STREAM: Error de enlace.") }
         case .endEncountered:
             DispatchQueue.main.async {
-                self.agregarLog("STREAM: Conexión finalizada por el helicóptero.")
-                self.conectado = false
+                self.agregarLog("STREAM: Enlace cerrado por el helicóptero.")
+                self.cerrar()
             }
         case .hasBytesAvailable:
             if let inp = aStream as? InputStream {
@@ -252,42 +166,42 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
 struct ContentView: View {
     @StateObject private var mgr = HeliManager()
 
-    @State private var accSel: HeliManager.AccInfo?
-    @State private var protoSel = ""
-    @State private var perfiles: [ProtoProfile] = Perfiles.todos
-    @State private var perfilIdx = 0
-
-    // Mandos
+    // Mandos de vuelo
     @State private var gas: Double = 64
     @State private var pitch: Double = 127
     @State private var yaw: Double = 127
-    @State private var trim: Int = 8
+    @State private var trim: Int = 10     // default 10 de protocalData.plist
     @State private var matchVal: Int = 1
-    @State private var luces = false
-    @State private var vivo = false
-    @State private var hz = 20.0
+    @State private var luces = true       // Luces encendidas por defecto
+    @State private var transmitiendo = true
     @State private var capSeguro = true
-    @State private var testeando = false
 
-    var perfil: ProtoProfile { perfiles[perfilIdx] }
-
+    // Generador oficial de trama de vuelo (5 bytes)
+    // byte 0: 0x78 | ((match & 3) << 6)
+    // byte 1: rotor (gas 64..128)
+    // byte 2: pitch (0..255)
+    // byte 3: yaw (0..255)
+    // byte 4: (light << 5) | (trim & 0x1F)
     var tramaActual: [UInt8] {
-        var g: Int = Int(gas)
-        if capSeguro { g = Swift.min(g, 80) }
-        let luzVal = luces ? 7 : 3
-        return perfil.build(gas: g, pitch: Int(pitch), yaw: Int(yaw),
-                            trim: trim, luz: luzVal, match: matchVal)
+        let header = UInt8(0x78 | ((matchVal & 3) << 6))
+        let effectiveGas = UInt8(capSeguro ? Swift.min(Int(gas), 80) : Int(gas))
+        let effectivePitch = UInt8(Swift.max(0, Swift.min(255, Int(pitch))))
+        let effectiveYaw = UInt8(Swift.max(0, Swift.min(255, Int(yaw))))
+        let lightVal = UInt8(luces ? 7 : 3)
+        let byte4 = ((lightVal & 0x07) << 5) | (UInt8(trim) & 0x1F)
+        return [header, effectiveGas, effectivePitch, effectiveYaw, byte4]
     }
 
     var body: some View {
         TabView {
             mandoTab.tabItem { Label("Mando", systemImage: "gamecontroller.fill") }
             testsTab.tabItem { Label("Tests", systemImage: "bolt.horizontal.fill") }
-            logTab.tabItem { Label("Log", systemImage: "terminal.fill") }
+            logTab.tabItem { Label("Consola", systemImage: "terminal.fill") }
         }
         .onAppear {
-            mgr.agregarLog("BluHeli Master v4 Iniciado. Escaneando...")
-            _ = mgr.autoConectar(loguear: { mgr.agregarLog($0) })
+            mgr.agregarLog("Blu-Tech Heli v5 Iniciado. Buscando SL_BluTechHeli...")
+            mgr.buscarYConectarAuto()
+            iniciarBucleTransmision()
         }
     }
 
@@ -297,54 +211,44 @@ struct ContentView: View {
             Form {
                 Section("Estado de Conexión") {
                     HStack {
-                        Circle().fill(mgr.conectado ? Color.green : Color.red).frame(width: 12, height: 12)
-                        Text(mgr.conectado ? "CONECTADO [\(mgr.protoActivo)]" : "DESCONECTADO").bold()
+                        Circle().fill(mgr.conectado ? Color.green : Color.red).frame(width: 14, height: 14)
+                        VStack(alignment: .leading) {
+                            Text(mgr.conectado ? "CONECTADO: \(mgr.nombreDispositivo)" : "BUSCANDO HELICÓPTERO...").bold()
+                            if mgr.conectado {
+                                Text("Protocolo: \(mgr.protoActivo)").font(.caption2).foregroundColor(.secondary)
+                            }
+                        }
                         Spacer()
                         Text("\(mgr.framesEnviados) tramas").font(.caption).foregroundColor(.secondary)
                     }
-                    
-                    if !mgr.conectado {
-                        Button(action: {
-                            _ = mgr.autoConectar(loguear: { mgr.agregarLog($0) })
-                        }) {
-                            Label("Reconectar Helicóptero", systemImage: "arrow.clockwise")
-                        }
-                        
-                        Button(action: {
-                            mgr.mostrarPickeriOS(loguear: { mgr.agregarLog($0) })
-                        }) {
-                            Label("Abrir Selector Bluetooth MFi", systemImage: "wave.3.forward.circle")
-                        }
-                    } else {
-                        Button("Desconectar") {
-                            mgr.cerrar(loguear: { mgr.agregarLog($0) })
-                        }.foregroundColor(.red)
-                    }
-                }
 
-                Section("Perfil de Vuelo") {
-                    Picker("Perfil", selection: $perfilIdx) {
-                        ForEach(Array(perfiles.enumerated()), id: \.offset) { i, p in
-                            Text(p.name).tag(i)
+                    if !mgr.conectado {
+                        Button(action: { mgr.buscarYConectarAuto() }) {
+                            Label("Reconectar Ahora", systemImage: "arrow.clockwise")
+                        }
+                        Button(action: { mgr.abrirSelectorBluetooth() }) {
+                            Label("Abrir Selector Bluetooth MFi", systemImage: "wave.3.forward.circle")
                         }
                     }
                 }
 
                 Section("Controles de Vuelo") {
                     Toggle("🛡 Modo Seguro (Gas máx 80)", isOn: $capSeguro).tint(.orange)
-                    
+
                     VStack(alignment: .leading) {
                         HStack {
-                            Text("GAS (Rotor)").bold()
+                            Text("GAS (Acelerador Rotor)").bold()
                             Spacer()
-                            Text("\(Int(capSeguro ? Swift.min(gas, 80) : gas))").font(.headline).foregroundColor(gas > 64 ? .orange : .green)
+                            Text("\(Int(capSeguro ? Swift.min(gas, 80) : gas))")
+                                .font(.headline)
+                                .foregroundColor(gas > 64 ? .orange : .green)
                         }
                         Slider(value: $gas, in: 64...128, step: 1)
                     }
 
                     VStack(alignment: .leading) {
                         HStack {
-                            Text("PITCH (Adelante/Atrás)").bold()
+                            Text("PITCH (Adelante / Atrás)").bold()
                             Spacer()
                             Text("\(Int(pitch))").font(.subheadline)
                         }
@@ -362,30 +266,28 @@ struct ContentView: View {
 
                     HStack {
                         Picker("Trim", selection: $trim) {
-                            ForEach(0..<16) { Text("\($0)").tag($0) }
+                            ForEach(0..<21) { Text("\($0)").tag($0) }
                         }.pickerStyle(.menu)
-                        
+
                         Picker("Match", selection: $matchVal) {
                             ForEach(0..<4) { Text("m\($0)").tag($0) }
                         }.pickerStyle(.menu)
-                        
+
                         Toggle("Luces", isOn: $luces).tint(.yellow)
                     }
 
                     HStack {
-                        Toggle(vivo ? "TRANSMITIENDO" : "Enviar Continuo", isOn: $vivo)
-                            .tint(vivo ? .green : .blue)
-                    }
-
-                    HStack {
-                        Button("🛑 STOP") {
-                            gas = 64; pitch = 127; yaw = 127
-                            _ = mgr.enviar(perfil.build(gas: 64, pitch: 127, yaw: 127, trim: trim, luz: 3, match: matchVal), loguear: { mgr.agregarLog($0) })
+                        Button("🛑 PARADA DE EMERGENCIA") {
+                            gas = 64
+                            pitch = 127
+                            yaw = 127
+                            _ = mgr.enviarTrama(tramaActual)
                         }
-                        .buttonStyle(.borderedProminent).tint(.red)
-                        
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+
                         Spacer()
-                        
+
                         Text(tramaActual.map { String(format: "%02X", $0) }.joined(separator: " "))
                             .font(.system(.footnote, design: .monospaced))
                             .bold()
@@ -393,14 +295,7 @@ struct ContentView: View {
                     }
                 }
             }
-            .navigationTitle("BluHeli Mando")
-            .onChange(of: vivo) { on in
-                guard on else { return }
-                Timer.scheduledTimer(withTimeInterval: 1.0 / hz, repeats: true) { t in
-                    if !vivo || !mgr.conectado { t.invalidate(); vivo = false; return }
-                    _ = mgr.enviar(tramaActual, loguear: { mgr.agregarLog($0) })
-                }
-            }
+            .navigationTitle("Blu-Tech Heli")
         }
     }
 
@@ -408,14 +303,14 @@ struct ContentView: View {
     var testsTab: some View {
         NavigationView {
             Form {
-                Section("Suite de Diagnóstico Rápido") {
-                    Button("💡 Test Luces x3") { probarLuces() }
-                    Button("⚡ Pulso Gas Suave (76 - 1.5s)") { pulsarGas(76, duracion: 1.5) }
-                    Button("🔄 Barrido Match (0..3)") { barridoMatch() }
+                Section("Pruebas Rápidas de Diagnóstico") {
+                    Button("💡 Test Luces x3") { testLuces() }
+                    Button("⚡ Pulso Gas Suave (76 - 1.5s)") { testGas(76, duracion: 1.5) }
+                    Button("🔄 Barrido Match (0..3)") { testMatchSweep() }
                     Button("🎯 Centrar Mandos") { gas = 64; pitch = 127; yaw = 127 }
                 }
             }
-            .navigationTitle("Diagnóstico")
+            .navigationTitle("Pruebas")
         }
     }
 
@@ -423,12 +318,12 @@ struct ContentView: View {
     var logTab: some View {
         NavigationView {
             Form {
-                Section("Registro de Eventos") {
+                Section("Registro en Vivo") {
                     TextEditor(text: $mgr.log)
                         .font(.system(.caption, design: .monospaced))
                         .frame(minHeight: 350)
                     HStack {
-                        Button("Copiar Log") {
+                        Button("Copiar Registro") {
                             UIPasteboard.general.string = mgr.log
                             mgr.agregarLog("Log copiado al portapapeles.")
                         }
@@ -441,53 +336,51 @@ struct ContentView: View {
         }
     }
 
-    func pulsarGas(_ g: Int, duracion: Double) {
-        testeando = true
-        mgr.agregarLog("TEST: Pulso gas \(g) por \(duracion)s...")
-        var n = 0
-        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { t in
-            n += 1
-            _ = mgr.enviar(perfil.build(gas: g, pitch: 127, yaw: 127, trim: 8, luz: 3, match: matchVal), loguear: { mgr.agregarLog($0) })
-            if n >= Int(duracion * 20) {
-                t.invalidate()
-                _ = mgr.enviar(perfil.build(gas: 64, pitch: 127, yaw: 127, trim: 8, luz: 3, match: matchVal), loguear: { mgr.agregarLog($0) })
-                testeando = false
-                mgr.agregarLog("TEST: Gas finalizado.")
+    func iniciarBucleTransmision() {
+        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+            if mgr.conectado && transmitiendo {
+                _ = mgr.enviarTrama(tramaActual)
             }
         }
     }
 
-    func probarLuces() {
-        testeando = true
-        mgr.agregarLog("TEST: Luces ON/OFF x3...")
+    func testGas(_ g: Int, duracion: Double) {
+        mgr.agregarLog("TEST: Pulso de gas \(g) por \(duracion)s...")
+        let oldGas = gas
+        gas = Double(g)
+        DispatchQueue.main.asyncAfter(deadline: .now() + duracion) {
+            self.gas = oldGas
+            self.mgr.agregarLog("TEST: Fin de pulso de gas.")
+        }
+    }
+
+    func testLuces() {
+        mgr.agregarLog("TEST: Parpadeo de luces x3...")
         var paso = 0
         Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { t in
             paso += 1
-            let on = (paso % 2 == 1)
-            let luzVal = on ? 7 : 3
-            _ = mgr.enviar(perfil.build(gas: 64, pitch: 127, yaw: 127, trim: 8, luz: luzVal, match: matchVal), loguear: { mgr.agregarLog($0) })
+            self.luces.toggle()
             if paso >= 6 {
                 t.invalidate()
-                testeando = false
-                mgr.agregarLog("TEST: Luces finalizado.")
+                self.luces = true
+                self.mgr.agregarLog("TEST: Fin de test de luces.")
             }
         }
     }
 
-    func barridoMatch() {
-        testeando = true
-        mgr.agregarLog("TEST: Barrido match 0..3...")
+    func testMatchSweep() {
+        mgr.agregarLog("TEST: Probando Match 0, 1, 2, 3...")
         var m = 0
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { t in
             defer { m += 1 }
             if m > 3 {
                 t.invalidate()
-                testeando = false
-                mgr.agregarLog("TEST: Barrido match terminado.")
+                self.matchVal = 1
+                self.mgr.agregarLog("TEST: Fin de barrido match.")
                 return
             }
-            mgr.agregarLog("Probando MATCH = \(m)...")
-            _ = mgr.enviar(perfil.build(gas: 64, pitch: 127, yaw: 127, trim: 8, luz: 7, match: m), loguear: { mgr.agregarLog($0) })
+            self.matchVal = m
+            self.mgr.agregarLog("Probando MATCH = \(m)...")
         }
     }
 }

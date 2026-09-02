@@ -1,6 +1,6 @@
 name: BluHeli
 options:
-  bundleIdPrefix: es.moon.heli
+  bundleIdPrefix: com.silverlit
   deploymentTarget:
     iOS: "15.0"
   createIntermediateGroups: true
@@ -13,45 +13,22 @@ targets:
     info:
       path: Info.plist
       properties:
+        CFBundleIdentifier: com.silverlit.blueskyheli
+        CFBundleDisplayName: "Blu-Tech Heli"
         UISupportedExternalAccessoryProtocols:
+          - com.issc.datapath
+          - com.silverlit.datapath
           - com.silverlit.helicopter
           - com.silverlit.ferrari
           - com.silverlit.car
-          - com.silverlit.airplane
           - com.silverlit.blueskyheli
-          - com.silverlit.bsh
-          - com.silverlit.bsh-a
-          - com.silverlit.blutech
-          - com.silverlit.blutechheli
-          - com.silverlit.toy
-          - com.silverlit.bt
-          - com.silverlit.bluetooth
-          - com.silverlit.heli
-          - com.silverlit.control
-          - com.silverlit.smartlink
-          - com.silverlit.ia
-          - com.silverlit.ferraribt
-          - com.silverlit.rc
-          - com.silverlit.protocol
-          - com.silverlit.mfi
-          - com.silverlit.enzo
-          - com.silverlit.458
-          - com.silverlit.speed
-          - com.silverlit.bleferraricar
           - com.silverlit.btferrari
-          - com.silverlit.bluetoothrc
-          - com.silverlit.bluesky
-          - com.silverlit.rc.helicopter
-          - com.silverlit.smartlinkrc
-          - com.silverlit.smartlinkrc.helicopter
           - fi.wellmon.wECCAN
           - com.xpg.protocol
-          - com.xpg.bluecontrol
-          - com.apple.mfi
         UIBackgroundModes:
           - external-accessory
           - bluetooth-central
-        NSBluetoothAlwaysUsageDescription: "BluHeli usa Bluetooth para conectar y controlar tu helicóptero Silverlit."
-        NSBluetoothPeripheralUsageDescription: "BluHeli usa Bluetooth para comunicarse con accesorios MFi."
+        NSBluetoothAlwaysUsageDescription: "Blu-Tech Heli usa Bluetooth para controlar tu helicóptero Silverlit."
+        NSBluetoothPeripheralUsageDescription: "Blu-Tech Heli se comunica con el accesorio MFi del helicóptero."
         UILaunchScreen: {}
         CODE_SIGNING_ALLOWED: "NO"
