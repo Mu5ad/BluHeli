@@ -3,7 +3,7 @@ import ExternalAccessory
 import UIKit
 
 // =====================================================================
-// BLU-TECH HELI v5 (OFFICIAL PROTOCOL DATA & AUTHENTIC MFi STRINGS)
+// BLU-TECH HELI MASTER v6 — CALIBRACIÓN DINÁMICA DE TRAMAS & ROTORES
 // =====================================================================
 
 final class HeliManager: NSObject, ObservableObject, StreamDelegate {
@@ -12,7 +12,6 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
     @Published var protoActivo = ""
     @Published var log = ""
     @Published var framesEnviados = 0
-    @Published var bateriaInfo = "OK"
 
     private var session: EASession?
     private var timerAutoConnect: Timer?
@@ -25,7 +24,6 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(accessoryDisconnected(_:)),
                                                name: .EAAccessoryDidDisconnect, object: nil)
         
-        // Iniciar timer de auto-búsqueda cada 1.5s
         timerAutoConnect = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             guard let self = self, !self.conectado else { return }
             self.buscarYConectarAuto()
@@ -37,7 +35,7 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
     }
 
     @objc private func accessoryConnected(_ notification: Notification) {
-        agregarLog("NOTIF iOS: Accesorio Bluetooth MFi conectado!")
+        agregarLog("NOTIF iOS: Accesorio Bluetooth MFi detectado.")
         buscarYConectarAuto()
     }
 
@@ -46,44 +44,28 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
         cerrar()
     }
 
-    func abrirSelectorBluetooth() {
-        agregarLog("Abriendo selector Bluetooth MFi de iOS...")
-        EAAccessoryManager.shared().showBluetoothAccessoryPicker(withNameFilter: nil, completion: nil)
-    }
-
     func buscarYConectarAuto() {
         let accesorios = EAAccessoryManager.shared().connectedAccessories
-        if accesorios.isEmpty {
-            return
-        }
+        if accesorios.isEmpty { return }
 
         for acc in accesorios {
-            agregarLog("Detectado: \(acc.name) [\(acc.manufacturer)] - Protocolos: \(acc.protocolStrings.joined(separator: ", "))")
-            
-            // Prioridad: com.issc.datapath o com.silverlit.datapath
-            let candidatos = ["com.issc.datapath", "com.silverlit.datapath", "com.silverlit.helicopter", "com.silverlit.ferrari"]
+            let candidatos = ["com.silverlit.datapath", "com.issc.datapath", "com.silverlit.helicopter", "com.silverlit.ferrari"]
             for proto in candidatos {
                 if acc.protocolStrings.contains(proto) {
-                    if conectar(acc: acc, proto: proto) {
-                        return
-                    }
+                    if conectar(acc: acc, proto: proto) { return }
                 }
             }
-            
-            // Si tiene cualquier otro protocolo anunciado
-            if let primerProto = acc.protocolStrings.first {
-                if conectar(acc: acc, proto: primerProto) {
-                    return
-                }
+            if let primer = acc.protocolStrings.first {
+                if conectar(acc: acc, proto: primer) { return }
             }
         }
     }
 
     func conectar(acc: EAAccessory, proto: String) -> Bool {
         cerrar()
-        agregarLog("Intentando abrir EASession con \(acc.name) [\(proto)]...")
+        agregarLog("Abriendo EASession con \(acc.name) [\(proto)]...")
         guard let ses = EASession(accessory: acc, forProtocol: proto) else {
-            agregarLog("Error: iOS rechazó EASession para '\(proto)'.")
+            agregarLog("Error al abrir EASession con '\(proto)'.")
             return false
         }
 
@@ -103,7 +85,7 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
         }
 
         conectado = true
-        agregarLog(">>> ¡CONECTADO CON ÉXITO A \(acc.name)! <<<")
+        agregarLog(">>> ¡CONECTADO A \(acc.name)! <<<")
         return true
     }
 
@@ -121,9 +103,7 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
     }
 
     func enviarTrama(_ bytes: [UInt8]) -> Bool {
-        guard let out = session?.outputStream, out.hasSpaceAvailable else {
-            return false
-        }
+        guard let out = session?.outputStream, out.hasSpaceAvailable else { return false }
         let n = out.write(bytes, maxLength: bytes.count)
         if n == bytes.count {
             framesEnviados += 1
@@ -135,20 +115,11 @@ final class HeliManager: NSObject, ObservableObject, StreamDelegate {
     func stream(_ aStream: Stream, handle eventCode: Stream.Event) {
         switch eventCode {
         case .errorOccurred:
-            DispatchQueue.main.async { self.agregarLog("STREAM: Error de enlace.") }
+            DispatchQueue.main.async { self.agregarLog("STREAM: Error de comunicación.") }
         case .endEncountered:
             DispatchQueue.main.async {
                 self.agregarLog("STREAM: Enlace cerrado por el helicóptero.")
                 self.cerrar()
-            }
-        case .hasBytesAvailable:
-            if let inp = aStream as? InputStream {
-                var buf = [UInt8](repeating: 0, count: 64)
-                let n = inp.read(&buf, maxLength: 64)
-                if n > 0 {
-                    let hex = buf.prefix(n).map { String(format: "%02X", $0) }.joined(separator: " ")
-                    DispatchQueue.main.async { self.agregarLog("RX Heli: \(hex)") }
-                }
             }
         default: break
         }
@@ -170,26 +141,51 @@ struct ContentView: View {
     @State private var gas: Double = 64
     @State private var pitch: Double = 127
     @State private var yaw: Double = 127
-    @State private var trim: Int = 10     // default 10 de protocalData.plist
+    @State private var trim: Int = 10
     @State private var matchVal: Int = 1
-    @State private var luces = true       // Luces encendidas por defecto
+    @State private var luces = true
+    @State private var capSeguro = false
+    @State private var modoTramaIdx = 0
     @State private var transmitiendo = true
-    @State private var capSeguro = true
+    @State private var testEnCurso = false
 
-    // Generador oficial de trama de vuelo (5 bytes)
-    // byte 0: 0x78 | ((match & 3) << 6)
-    // byte 1: rotor (gas 64..128)
-    // byte 2: pitch (0..255)
-    // byte 3: yaw (0..255)
-    // byte 4: (light << 5) | (trim & 0x1F)
+    let nombresModos = [
+        "1. Bitmask Oficial (Byte 0: Trim/Luz, Byte 3: Gas, Byte 4: 'x')",
+        "2. Header Primero (Byte 0: 'x', Byte 1: Gas, Byte 4: Trim/Luz)",
+        "3. Invertido (Byte 0: 'x', Byte 1: Trim/Luz, Byte 4: Gas)",
+        "4. Potencia Alta (0..255 en Byte 1, Header 0x78)"
+    ]
+
+    func construirTrama(gasVal: Int, pitchVal: Int, yawVal: Int, trimVal: Int, luzVal: Bool, match: Int, modo: Int) -> [UInt8] {
+        let h = UInt8(0x78 | ((match & 3) << 6))
+        let g = UInt8(Swift.max(0, Swift.min(255, gasVal)))
+        let p = UInt8(Swift.max(0, Swift.min(255, pitchVal)))
+        let y = UInt8(Swift.max(0, Swift.min(255, yawVal)))
+        let l = UInt8(luzVal ? 7 : 3)
+        let lt = UInt8(((l & 0x07) << 5) | (UInt8(trimVal) & 0x1F))
+
+        switch modo {
+        case 0:
+            // Bitmask original de protocalData.plist (Little Endian): [LT, YAW, PITCH, ROTOR, HEADER]
+            return [lt, y, p, g, h]
+        case 1:
+            // Big Endian: [HEADER, ROTOR, PITCH, YAW, LT]
+            return [h, g, p, y, lt]
+        case 2:
+            // Layout alternativo (similar al coche): [HEADER, LT, YAW, PITCH, ROTOR]
+            return [h, lt, y, p, g]
+        case 3:
+            // Potencia directa escalada: [HEADER, g, p, y, lt]
+            return [h, UInt8(Swift.min(255, gasVal * 2)), p, y, lt]
+        default:
+            return [lt, y, p, g, h]
+        }
+    }
+
     var tramaActual: [UInt8] {
-        let header = UInt8(0x78 | ((matchVal & 3) << 6))
-        let effectiveGas = UInt8(capSeguro ? Swift.min(Int(gas), 80) : Int(gas))
-        let effectivePitch = UInt8(Swift.max(0, Swift.min(255, Int(pitch))))
-        let effectiveYaw = UInt8(Swift.max(0, Swift.min(255, Int(yaw))))
-        let lightVal = UInt8(luces ? 7 : 3)
-        let byte4 = ((lightVal & 0x07) << 5) | (UInt8(trim) & 0x1F)
-        return [header, effectiveGas, effectivePitch, effectiveYaw, byte4]
+        let g = capSeguro ? Swift.min(Int(gas), 80) : Int(gas)
+        return construirTrama(gasVal: g, pitchVal: Int(pitch), yawVal: Int(yaw),
+                              trimVal: trim, luzVal: luces, match: matchVal, modo: modoTramaIdx)
     }
 
     var body: some View {
@@ -199,7 +195,7 @@ struct ContentView: View {
             logTab.tabItem { Label("Consola", systemImage: "terminal.fill") }
         }
         .onAppear {
-            mgr.agregarLog("Blu-Tech Heli v5 Iniciado. Buscando SL_BluTechHeli...")
+            mgr.agregarLog("Blu-Tech Heli Master v6 Listo.")
             mgr.buscarYConectarAuto()
             iniciarBucleTransmision()
         }
@@ -221,13 +217,12 @@ struct ContentView: View {
                         Spacer()
                         Text("\(mgr.framesEnviados) tramas").font(.caption).foregroundColor(.secondary)
                     }
+                }
 
-                    if !mgr.conectado {
-                        Button(action: { mgr.buscarYConectarAuto() }) {
-                            Label("Reconectar Ahora", systemImage: "arrow.clockwise")
-                        }
-                        Button(action: { mgr.abrirSelectorBluetooth() }) {
-                            Label("Abrir Selector Bluetooth MFi", systemImage: "wave.3.forward.circle")
+                Section("Orden de Trama (Byte Packing)") {
+                    Picker("Modo Trama", selection: $modoTramaIdx) {
+                        ForEach(0..<nombresModos.count, id: \.self) { i in
+                            Text(nombresModos[i]).tag(i)
                         }
                     }
                 }
@@ -237,18 +232,18 @@ struct ContentView: View {
 
                     VStack(alignment: .leading) {
                         HStack {
-                            Text("GAS (Acelerador Rotor)").bold()
+                            Text("GAS (Acelerador)").bold()
                             Spacer()
                             Text("\(Int(capSeguro ? Swift.min(gas, 80) : gas))")
                                 .font(.headline)
                                 .foregroundColor(gas > 64 ? .orange : .green)
                         }
-                        Slider(value: $gas, in: 64...128, step: 1)
+                        Slider(value: $gas, in: 0...128, step: 1)
                     }
 
                     VStack(alignment: .leading) {
                         HStack {
-                            Text("PITCH (Adelante / Atrás)").bold()
+                            Text("PITCH (Adelante/Atrás)").bold()
                             Spacer()
                             Text("\(Int(pitch))").font(.subheadline)
                         }
@@ -277,8 +272,8 @@ struct ContentView: View {
                     }
 
                     HStack {
-                        Button("🛑 PARADA DE EMERGENCIA") {
-                            gas = 64
+                        Button("🛑 STOP") {
+                            gas = 0
                             pitch = 127
                             yaw = 127
                             _ = mgr.enviarTrama(tramaActual)
@@ -295,7 +290,7 @@ struct ContentView: View {
                     }
                 }
             }
-            .navigationTitle("Blu-Tech Heli")
+            .navigationTitle("Blu-Tech Heli v6")
         }
     }
 
@@ -303,14 +298,26 @@ struct ContentView: View {
     var testsTab: some View {
         NavigationView {
             Form {
-                Section("Pruebas Rápidas de Diagnóstico") {
+                Section("Calibración Definitiva de Motores") {
+                    Button(action: { ejecutarSuperTestRotores() }) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Image(systemName: "flame.fill").foregroundColor(.orange)
+                                Text("🔥 SUPER TEST: BARRIDO DE 4 MODOS (GAS 100)").bold()
+                            }
+                            Text("Prueba los 4 formatos de trama (2 segundos cada uno) con potencia real.").font(.caption).foregroundColor(.secondary)
+                        }
+                    }
+                    .disabled(testEnCurso)
+
+                    Button("⚡ Pulso Gas Modo 1 (Oficial 0..128 - Gas 95)") { probarModoIndividual(0, gas: 95) }
+                    Button("⚡ Pulso Gas Modo 2 (Header Primero - Gas 95)") { probarModoIndividual(1, gas: 95) }
+                    Button("⚡ Pulso Gas Modo 3 (Invertido - Gas 95)") { probarModoIndividual(2, gas: 95) }
+                    Button("⚡ Pulso Gas Modo 4 (Escalado 0..255)") { probarModoIndividual(3, gas: 95) }
                     Button("💡 Test Luces x3") { testLuces() }
-                    Button("⚡ Pulso Gas Suave (76 - 1.5s)") { testGas(76, duracion: 1.5) }
-                    Button("🔄 Barrido Match (0..3)") { testMatchSweep() }
-                    Button("🎯 Centrar Mandos") { gas = 64; pitch = 127; yaw = 127 }
                 }
             }
-            .navigationTitle("Pruebas")
+            .navigationTitle("Tests y Calibración")
         }
     }
 
@@ -318,12 +325,12 @@ struct ContentView: View {
     var logTab: some View {
         NavigationView {
             Form {
-                Section("Registro en Vivo") {
+                Section("Consola") {
                     TextEditor(text: $mgr.log)
                         .font(.system(.caption, design: .monospaced))
                         .frame(minHeight: 350)
                     HStack {
-                        Button("Copiar Registro") {
+                        Button("Copiar Log") {
                             UIPasteboard.general.string = mgr.log
                             mgr.agregarLog("Log copiado al portapapeles.")
                         }
@@ -338,19 +345,60 @@ struct ContentView: View {
 
     func iniciarBucleTransmision() {
         Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
-            if mgr.conectado && transmitiendo {
+            if mgr.conectado && transmitiendo && !testEnCurso {
                 _ = mgr.enviarTrama(tramaActual)
             }
         }
     }
 
-    func testGas(_ g: Int, duracion: Double) {
-        mgr.agregarLog("TEST: Pulso de gas \(g) por \(duracion)s...")
-        let oldGas = gas
-        gas = Double(g)
-        DispatchQueue.main.asyncAfter(deadline: .now() + duracion) {
-            self.gas = oldGas
-            self.mgr.agregarLog("TEST: Fin de pulso de gas.")
+    func probarModoIndividual(_ m: Int, gas: Int) {
+        testEnCurso = true
+        modoTramaIdx = m
+        mgr.agregarLog("PROBANDO MODO \(m+1) con Gas=\(gas) por 2.5 segundos...")
+        var n = 0
+        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { t in
+            n += 1
+            let pkt = construirTrama(gasVal: gas, pitchVal: 127, yawVal: 127, trimVal: 10, luzVal: true, match: matchVal, modo: m)
+            _ = mgr.enviarTrama(pkt)
+            if n >= 50 {
+                t.invalidate()
+                let stopPkt = construirTrama(gasVal: 0, pitchVal: 127, yawVal: 127, trimVal: 10, luzVal: true, match: matchVal, modo: m)
+                _ = mgr.enviarTrama(stopPkt)
+                testEnCurso = false
+                mgr.agregarLog("Fin de prueba Modo \(m+1).")
+            }
+        }
+    }
+
+    func ejecutarSuperTestRotores() {
+        testEnCurso = true
+        mgr.agregarLog("=== INICIANDO SUPER BARRIDO DE 4 MODOS ===")
+        mgr.agregarLog("¡SUJETA EL HELICÓPTERO EN LA MANO!")
+
+        var modoActual = 0
+        Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { t in
+            if modoActual > 3 {
+                t.invalidate()
+                testEnCurso = false
+                mgr.agregarLog("=== SUPER BARRIDO COMPLETADO ===")
+                return
+            }
+
+            mgr.agregarLog(">>> PROBANDO MODO \(modoActual + 1) (GAS 100)... <<<")
+            self.modoTramaIdx = modoActual
+            
+            var n = 0
+            Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { tt in
+                n += 1
+                let pkt = self.construirTrama(gasVal: 100, pitchVal: 127, yawVal: 127, trimVal: 10, luzVal: true, match: self.matchVal, modo: modoActual)
+                _ = self.mgr.enviarTrama(pkt)
+                if n >= 40 {
+                    tt.invalidate()
+                    let stopPkt = self.construirTrama(gasVal: 0, pitchVal: 127, yawVal: 127, trimVal: 10, luzVal: true, match: self.matchVal, modo: modoActual)
+                    _ = self.mgr.enviarTrama(stopPkt)
+                }
+            }
+            modoActual += 1
         }
     }
 
@@ -365,22 +413,6 @@ struct ContentView: View {
                 self.luces = true
                 self.mgr.agregarLog("TEST: Fin de test de luces.")
             }
-        }
-    }
-
-    func testMatchSweep() {
-        mgr.agregarLog("TEST: Probando Match 0, 1, 2, 3...")
-        var m = 0
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { t in
-            defer { m += 1 }
-            if m > 3 {
-                t.invalidate()
-                self.matchVal = 1
-                self.mgr.agregarLog("TEST: Fin de barrido match.")
-                return
-            }
-            self.matchVal = m
-            self.mgr.agregarLog("Probando MATCH = \(m)...")
         }
     }
 }
