@@ -69,7 +69,7 @@ final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
     // Selector Bluetooth nativo de Apple para cuando el heli se apaga y se vuelve a encender
     func abrirSelectorBluetoothMFi() {
         agregarLog("Abriendo selector Bluetooth MFi de Apple...")
-        EAAccessoryManager.shared().showBluetoothAccessoryPicker(withPredicate: nil, completion: { [weak self] (error: Error?) in
+        EAAccessoryManager.shared().showBluetoothAccessoryPicker(withNameFilter: nil, completion: { [weak self] error in
             if let err = error {
                 self?.agregarLog("Selector MFi: \(err.localizedDescription)")
             } else {
