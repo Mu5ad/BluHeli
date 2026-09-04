@@ -3,7 +3,7 @@ import ExternalAccessory
 import UIKit
 
 // =====================================================================
-// BLUHELI PILOT v12 — PROTOCOLO REAL (TEXTO HEX) + ASISTENTE + MANDOS
+// BLUHELI PILOT v13 — PROTOCOLO REAL (TEXTO HEX) + HILO DE ENLACE + MANDOS
 //
 // Ingeniería inversa del binario oficial sHelicopter (XPGMobileAppConvertor):
 //   convertToAppProtocolData:  acumula cada campo del plist con
@@ -159,11 +159,40 @@ struct Codificador {
 
 // MARK: - Piloto
 
+/// Hilo dedicado con su propio RunLoop para los streams MFi y el temporizador de envío.
+/// La interfaz (hilo principal) puede congelarse al redibujar; este hilo nunca.
+final class HiloEnlace: Thread {
+    private let listo = DispatchSemaphore(value: 0)
+    override func main() {
+        let rl = RunLoop.current
+        rl.add(NSMachPort(), forMode: .default)
+        listo.signal()
+        while !isCancelled {
+            _ = rl.run(mode: .default, before: Date(timeIntervalSinceNow: 1.0))
+        }
+    }
+    func arrancar() { start(); listo.wait() }
+}
+
+/// Consigna de vuelo que el hilo principal escribe y el hilo de enlace lee (bajo cerrojo).
+struct Consigna {
+    var gasObjetivo: Double = 0
+    var pitch: Double = 127
+    var yaw: Double = 127
+    var trim: Int = 10
+    var match: Int = 1
+    var perfil: Perfil = Perfil.silverlitTexto
+    var tope: Double = 65
+    var armadoActivo: Bool = true
+    var rampa: Double = 2.5
+    var ticksArmado: Int = 8
+}
+
 final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
 
-    static let versionApp = "Pilot v12"
+    static let versionApp = "Pilot v13"
 
-    // Enlace
+    // Enlace (publicado en el hilo principal)
     @Published var conectado = false
     @Published var nombreDispositivo = ""
     @Published var protoActivo = ""
@@ -174,21 +203,34 @@ final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
     @Published var tramaVisible = ""
     @Published var rxTexto = ""
     @Published var rxHex = ""
-    @Published var rxBateria: Int? = nil       // receive_power bits 2-3 (0..3)
-    @Published var rxEmergencia: Int? = nil    // receive_emergency bits 4-5
+    @Published var rxNivel: Int? = nil          // byte 1 de la respuesta "x NN 00 00" (168 = lleno)
+    @Published var rxFlag: Int = 0              // byte 2 de la respuesta (visto 01 alguna vez)
+    @Published var reconexionBloqueadaHasta: Date? = nil
+    @Published var bateriaReposo: Int? = nil    // % máximo de los últimos 10 s (menos afectado por la carga del motor)
+    @Published var minutosRestantes: Int? = nil // estimación hasta el 25 %, con la pendiente de los últimos 2 min
+    private var historialBateria: [(Date, Int)] = []
+
+    // Modo fácil (botones de dirección + hover memorizado)
+    @Published var modoFacil: Bool { didSet { UserDefaults.standard.set(modoFacil, forKey: "modoFacil") } }
+    @Published var gasHover: Double { didSet { UserDefaults.standard.set(gasHover, forKey: "gasHover") } }
+
+    var bateriaPorcentaje: Int? {
+        guard let n = rxNivel, n != 255 else { return nil }
+        return Swift.max(0, Swift.min(100, Int((Double(n) / 168.0 * 100.0).rounded())))
+    }
 
     // Protocolo
-    @Published var perfilActivo: Perfil { didSet { guardarPerfil() } }
-    @Published var intervaloMs: Int { didSet { UserDefaults.standard.set(intervaloMs, forKey: "intervaloMs"); reprogramarTimerTx() } }
-    @Published var match: Int { didSet { UserDefaults.standard.set(match, forKey: "match") } }
+    @Published var perfilActivo: Perfil { didSet { guardarPerfil(); sincronizarConsigna() } }
+    @Published var intervaloMs: Int { didSet { UserDefaults.standard.set(intervaloMs, forKey: "intervaloMs"); reinstalarTimer() } }
+    @Published var match: Int { didSet { UserDefaults.standard.set(match, forKey: "match"); sincronizarConsigna() } }
 
     // Vuelo
-    @Published var gasObjetivo: Double = 0.0
+    @Published var gasObjetivo: Double = 0.0 { didSet { sincronizarConsigna() } }
     @Published var gasEnviado: Double = 0.0
-    @Published var pitch: Double = 127.0
-    @Published var yaw: Double = 127.0
-    @Published var trim: Int
-    @Published var modoSalon: Bool { didSet { UserDefaults.standard.set(modoSalon, forKey: "modoSalon") } }
+    @Published var pitch: Double = 127.0 { didSet { sincronizarConsigna() } }
+    @Published var yaw: Double = 127.0 { didSet { sincronizarConsigna() } }
+    @Published var trim: Int { didSet { sincronizarConsigna() } }
+    @Published var modoSalon: Bool { didSet { UserDefaults.standard.set(modoSalon, forKey: "modoSalon"); sincronizarConsigna() } }
     @Published var autoCentrar: Bool = true
     @Published var gasSpring: Bool = false
     @Published var sensibilidad: Double = 0.7
@@ -196,8 +238,8 @@ final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
     @Published var invertirPitch: Bool = false
     @Published var potenciaMantener: Double = 50
     @Published var potenciaDespegue: Double = 45
-    @Published var rampaPorTick: Double = 2.5
-    @Published var armadoActivo: Bool = true
+    @Published var rampaPorTick: Double = 2.5 { didSet { sincronizarConsigna() } }
+    @Published var armadoActivo: Bool = true { didSet { sincronizarConsigna() } }
     @Published var armado = false
     @Published var maniobraActiva = false
 
@@ -205,24 +247,39 @@ final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
     enum EstadoAsistente: Equatable { case inactivo, probando(Int), pregunta(Int), exito(Int), fracaso }
     @Published var asistente: EstadoAsistente = .inactivo
     @Published var potenciaAsistente: Double = 35
-    var perfilEnPrueba: Perfil? = nil
+    var perfilEnPrueba: Perfil? = nil { didSet { sincronizarConsigna() } }
 
     let topeSalon: Double = 65.0
     let ticksArmado = 8
     var topeActual: Double { modoSalon ? topeSalon : 100.0 }
     var perfilEnUso: Perfil { perfilEnPrueba ?? perfilActivo }
 
-    private var session: EASession?
+    // ---- Compartido entre hilos (bajo cerrojo) ----
+    private let cerrojo = NSLock()
+    private var consigna = Consigna()
+    private var rafagaStop = 0
+    private var sesionHilo: EASession? = nil
+
+    // ---- Solo hilo de enlace ----
+    private let hilo = HiloEnlace()
     private var timerTx: Timer?
-    private var timerAuto: Timer?
-    private var timerManiobra: Timer?
+    private var gasEnv: Double = 0
     private var ticksEnCero = 0
+    private var armadoInterno = false
     private var contadorHz = 0
     private var tUltimoHz = Date()
     private var tUltimoTick = Date()
     private var tUltimoLogRx = Date(timeIntervalSince1970: 0)
-    private var accesorioActualID: Int = -1
+    private var txTotal = 0
+    private var txDescartados = 0
+    private var ticksDesdePublicacion = 0
     private var rxBuffer: [UInt8] = []
+
+    // ---- Solo hilo principal ----
+    private var session: EASession?
+    private var timerAuto: Timer?
+    private var timerManiobra: Timer?
+    private var accesorioActualID: Int = -1
 
     override init() {
         let ud = UserDefaults.standard
@@ -234,45 +291,71 @@ final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
         intervaloMs = ud.object(forKey: "intervaloMs") as? Int ?? 50
         match = ud.object(forKey: "match") as? Int ?? 1
         modoSalon = ud.object(forKey: "modoSalon") as? Bool ?? true
+        modoFacil = ud.object(forKey: "modoFacil") as? Bool ?? true
+        gasHover = ud.object(forKey: "gasHover") as? Double ?? 50
         trim = 10
         super.init()
         trim = perfilActivo.trimNeutro
+        sincronizarConsigna()
+
+        hilo.name = "BluHeli.enlace"
+        hilo.qualityOfService = .userInteractive
+        hilo.arrancar()
+        reinstalarTimer()
 
         EAAccessoryManager.shared().registerForLocalNotifications()
         NotificationCenter.default.addObserver(self, selector: #selector(accesorioConectado(_:)), name: .EAAccessoryDidConnect, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(accesorioDesconectado(_:)), name: .EAAccessoryDidDisconnect, object: nil)
 
-        let ta = Timer(timeInterval: 1.5, repeats: true) { [weak self] _ in
-            guard let self = self, !self.conectado else { return }
-            self.buscarYConectarAuto()
+        let ta = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            if let hasta = self.reconexionBloqueadaHasta {
+                if Date() < hasta { return }
+                self.reconexionBloqueadaHasta = nil
+                self.agregarLog("Reconexión desbloqueada.")
+            }
+            if !self.conectado { self.buscarYConectarAuto() }
         }
         RunLoop.main.add(ta, forMode: .common)
         timerAuto = ta
-        reprogramarTimerTx()
+        cargarGrabaciones()
         agregarLog("\(HeliPilot.versionApp) listo. Perfil: \(perfilActivo.nombre). Esperando Chatboard...")
     }
 
     deinit {
-        timerTx?.invalidate(); timerAuto?.invalidate(); timerManiobra?.invalidate()
+        timerAuto?.invalidate(); timerManiobra?.invalidate()
+        hilo.cancel()
     }
 
     private func guardarPerfil() {
         if let d = try? JSONEncoder().encode(perfilActivo) { UserDefaults.standard.set(d, forKey: "perfilActivo") }
     }
 
-    private func reprogramarTimerTx() {
+    /// Copia la consigna actual para el hilo de enlace. Llamada en el hilo principal.
+    private func sincronizarConsigna() {
+        let c = Consigna(gasObjetivo: gasObjetivo, pitch: pitch, yaw: yaw, trim: trim, match: match,
+                         perfil: perfilEnUso, tope: topeActual, armadoActivo: armadoActivo,
+                         rampa: rampaPorTick, ticksArmado: ticksArmado)
+        cerrojo.lock(); consigna = c; cerrojo.unlock()
+    }
+
+    private func reinstalarTimer() {
+        perform(#selector(instalarTimerEnHilo), on: hilo, with: nil, waitUntilDone: false)
+    }
+
+    @objc private func instalarTimerEnHilo() {
         timerTx?.invalidate()
         let ms = Swift.max(20, Swift.min(200, intervaloMs))
-        let t = Timer(timeInterval: Double(ms) / 1000.0, repeats: true) { [weak self] _ in self?.tick() }
-        t.tolerance = 0.002
-        RunLoop.main.add(t, forMode: .common)
+        let t = Timer(timeInterval: Double(ms) / 1000.0, repeats: true) { [weak self] _ in self?.tickEnlace() }
+        t.tolerance = 0.001
+        RunLoop.current.add(t, forMode: .default)
         timerTx = t
     }
 
-    // MARK: Conexión MFi
+    // MARK: Conexión MFi (hilo principal)
     @objc private func accesorioConectado(_ n: Notification) {
         agregarLog("NOTIF: iOS ha conectado un accesorio.")
-        if !conectado { buscarYConectarAuto() }
+        if !conectado && reconexionBloqueadaHasta == nil { buscarYConectarAuto() }
     }
 
     @objc private func accesorioDesconectado(_ n: Notification) {
@@ -292,6 +375,7 @@ final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
     }
 
     func buscarYConectarAuto() {
+        if let hasta = reconexionBloqueadaHasta, Date() < hasta { return }
         let accesorios = EAAccessoryManager.shared().connectedAccessories
         if accesorios.isEmpty { return }
         let preferidos = ["com.silverlit.datapath", "com.issc.datapath", "com.silverlit.helicopter", "com.silverlit.ferrari"]
@@ -313,96 +397,146 @@ final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
         nombreDispositivo = acc.name
         protoActivo = proto
         accesorioActualID = acc.connectionID
-        if let inp = ses.inputStream { inp.delegate = self; inp.schedule(in: .main, forMode: .common); inp.open() }
-        if let out = ses.outputStream { out.delegate = self; out.schedule(in: .main, forMode: .common); out.open() }
-        gasObjetivo = 0; gasEnviado = 0; ticksEnCero = 0; armado = false
-        framesEnviados = 0; framesDescartados = 0; rxBuffer = []
+        gasObjetivo = 0
+        perform(#selector(abrirStreamsEnHilo(_:)), on: hilo, with: ses, waitUntilDone: true)
+        framesEnviados = 0; framesDescartados = 0; gasEnviado = 0; armado = false
+        historialBateria = []; bateriaReposo = nil; minutosRestantes = nil
         conectado = true
         agregarLog(">>> CONECTADO a \(acc.name). Enviando \(perfilEnUso.nombre) a \(1000 / Swift.max(1, intervaloMs)) Hz con gas 0. <<<")
         return true
     }
 
     func cerrarSesion() {
-        if let ses = session {
-            ses.inputStream?.close(); ses.outputStream?.close()
-            ses.inputStream?.remove(from: .main, forMode: .common); ses.outputStream?.remove(from: .main, forMode: .common)
-        }
+        perform(#selector(cerrarStreamsEnHilo), on: hilo, with: nil, waitUntilDone: true)
         session = nil; accesorioActualID = -1
         conectado = false; nombreDispositivo = ""; protoActivo = ""
         timerManiobra?.invalidate(); maniobraActiva = false
+        if reproduciendo != nil { reproduccionDetener(motivo: "cortada por desconexión") }
+        if grabando { grabacionDetener() }
         if case .probando = asistente { asistente = .inactivo; perfilEnPrueba = nil }
         gasObjetivo = 0; gasEnviado = 0; armado = false; hzReal = 0
     }
 
-    /// Corte físico garantizado: cerrar el enlace MFi (el heli para al perder el enlace) y reconectar.
+    /// Cierra la sesión MFi y bloquea la reconexión automática 6 s. iOS mantiene el Bluetooth
+    /// emparejado, así que el heli deja de recibir tramas durante esos 6 s.
     func paradaDura() {
-        agregarLog("⛔ PARADA DURA: cerrando el enlace MFi. Reconectando en 2 s...")
+        if let hasta = reconexionBloqueadaHasta, Date() < hasta {
+            agregarLog("Parada dura ya en curso."); return
+        }
+        agregarLog("⛔ PARADA DURA: sesión MFi cerrada. Sin tramas durante 6 s, luego reconecta.")
         paradaTotalEmergencia(motivo: "parada dura")
+        reconexionBloqueadaHasta = Date(timeIntervalSinceNow: 6.0)
         cerrarSesion()
-        let t = Timer(timeInterval: 2.0, repeats: false) { [weak self] _ in self?.buscarYConectarAuto() }
-        RunLoop.main.add(t, forMode: .common)
     }
 
-    // MARK: Bucle de envío
-    private func tick() {
+    // MARK: Streams (hilo de enlace)
+    @objc private func abrirStreamsEnHilo(_ obj: Any) {
+        guard let ses = obj as? EASession else { return }
+        let rl = RunLoop.current
+        if let inp = ses.inputStream { inp.delegate = self; inp.schedule(in: rl, forMode: .default); inp.open() }
+        if let out = ses.outputStream { out.delegate = self; out.schedule(in: rl, forMode: .default); out.open() }
+        gasEnv = 0; ticksEnCero = 0; armadoInterno = false
+        txTotal = 0; txDescartados = 0; contadorHz = 0; rxBuffer = []
+        cerrojo.lock(); sesionHilo = ses; rafagaStop = 0; cerrojo.unlock()
+    }
+
+    @objc private func cerrarStreamsEnHilo() {
+        cerrojo.lock(); let ses = sesionHilo; sesionHilo = nil; cerrojo.unlock()
+        guard let s = ses else { return }
+        let rl = RunLoop.current
+        s.inputStream?.close(); s.outputStream?.close()
+        s.inputStream?.remove(from: rl, forMode: .default); s.outputStream?.remove(from: rl, forMode: .default)
+        s.inputStream?.delegate = nil; s.outputStream?.delegate = nil
+    }
+
+    // MARK: Bucle de envío (hilo de enlace)
+    private func tickEnlace() {
         let ahora = Date()
         let hueco = ahora.timeIntervalSince(tUltimoTick)
         tUltimoTick = ahora
-        if conectado && hueco > 0.25 { agregarLog(String(format: "⚠️ Hueco en el stream: %.0f ms", hueco * 1000)) }
-        guard conectado else { return }
-        actualizarGas()
-        enviarTramaActual()
-        contadorHz += 1
-        if ahora.timeIntervalSince(tUltimoHz) >= 1.0 { hzReal = contadorHz; contadorHz = 0; tUltimoHz = ahora }
-    }
 
-    private func actualizarGas() {
-        let objetivo = Swift.min(Swift.max(0.0, gasObjetivo), topeActual)
+        cerrojo.lock()
+        let c = consigna
+        let ses = sesionHilo
+        let stops = rafagaStop
+        rafagaStop = 0
+        cerrojo.unlock()
+        guard let out = ses?.outputStream else { return }
+
+        if hueco > 0.25 { agregarLog(String(format: "⚠️ Hueco en el hilo de enlace: %.0f ms", hueco * 1000)) }
+
+        // Ráfaga de parada inmediata
+        if stops > 0 {
+            gasEnv = 0; ticksEnCero = 0; armadoInterno = false
+            let stop = Codificador.trama(perfil: c.perfil, rotor: 0, pitch: 127, yaw: 127, trim: c.trim, match: c.match)
+            for _ in 0..<stops { _ = escribir(out, stop.bytes) }
+        }
+
+        // Máquina de estados del gas
+        let objetivo = Swift.min(Swift.max(0.0, c.gasObjetivo), c.tope)
         if objetivo <= 0 {
-            gasEnviado = 0
+            gasEnv = 0
             ticksEnCero = Swift.min(ticksEnCero + 1, 100_000)
-            armado = !armadoActivo || ticksEnCero >= ticksArmado
-            return
+            armadoInterno = !c.armadoActivo || ticksEnCero >= c.ticksArmado
+        } else {
+            var subir = true
+            if c.armadoActivo && gasEnv <= 0 && ticksEnCero < c.ticksArmado {
+                ticksEnCero += 1
+                armadoInterno = ticksEnCero >= c.ticksArmado
+                if !armadoInterno { subir = false }
+                else { agregarLog("✅ Armado (\(c.ticksArmado) tramas a gas 0). Subiendo hacia \(Int(objetivo)) %.") }
+            }
+            if subir {
+                if gasEnv <= 0 { agregarLog("▶️ Rotor: rampa hacia \(Int(objetivo)) % (rotor \(rotor(objetivo, c.perfil))/\(c.perfil.rotorMax)).") }
+                if objetivo > gasEnv { gasEnv = Swift.min(objetivo, gasEnv + c.rampa) } else { gasEnv = objetivo }
+                ticksEnCero = 0
+                armadoInterno = true
+            }
         }
-        if armadoActivo && gasEnviado <= 0 && ticksEnCero < ticksArmado {
-            ticksEnCero += 1
-            armado = ticksEnCero >= ticksArmado
-            if !armado { return }
-            agregarLog("✅ Armado (\(ticksArmado) tramas a gas 0). Subiendo hacia \(Int(objetivo)) %.")
+
+        let t = Codificador.trama(perfil: c.perfil, rotor: rotor(gasEnv, c.perfil), pitch: Int(c.pitch), yaw: Int(c.yaw), trim: c.trim, match: c.match)
+        if escribir(out, t.bytes) { txTotal += 1 } else { txDescartados += 1 }
+
+        contadorHz += 1
+        var hz: Int? = nil
+        if ahora.timeIntervalSince(tUltimoHz) >= 1.0 { hz = contadorHz; contadorHz = 0; tUltimoHz = ahora }
+
+        // Publicar a la interfaz a 10 Hz (no a 20) para no saturar el redibujado
+        ticksDesdePublicacion += 1
+        if ticksDesdePublicacion >= 2 || hz != nil {
+            ticksDesdePublicacion = 0
+            let ge = gasEnv, tv = t.visible, tx = txTotal, td = txDescartados, arm = armadoInterno
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.gasEnviado = ge; self.tramaVisible = tv
+                self.framesEnviados = tx; self.framesDescartados = td; self.armado = arm
+                if let h = hz { self.hzReal = h }
+            }
         }
-        if gasEnviado <= 0 { agregarLog("▶️ Rotor: rampa hacia \(Int(objetivo)) % (rotor \(rotorDe(objetivo))/\(perfilEnUso.rotorMax)).") }
-        if objetivo > gasEnviado { gasEnviado = Swift.min(objetivo, gasEnviado + rampaPorTick) } else { gasEnviado = objetivo }
-        ticksEnCero = 0
-        armado = true
     }
 
-    func rotorDe(_ porcentaje: Double) -> Int {
-        let v = (Swift.max(0.0, Swift.min(100.0, porcentaje)) / 100.0) * Double(perfilEnUso.rotorMax)
-        return Int(v.rounded())
+    private func rotor(_ porcentaje: Double, _ p: Perfil) -> Int {
+        Int(((Swift.max(0.0, Swift.min(100.0, porcentaje)) / 100.0) * Double(p.rotorMax)).rounded())
     }
 
+    private func escribir(_ out: OutputStream, _ bytes: [UInt8]) -> Bool {
+        guard out.hasSpaceAvailable else { return false }
+        return out.write(bytes, maxLength: bytes.count) == bytes.count
+    }
+
+    // Helpers para la interfaz (hilo principal)
+    func rotorDe(_ porcentaje: Double) -> Int { rotor(porcentaje, perfilEnUso) }
     func tramaActual() -> (bytes: [UInt8], visible: String) {
         Codificador.trama(perfil: perfilEnUso, rotor: rotorDe(gasEnviado), pitch: Int(pitch), yaw: Int(yaw), trim: trim, match: match)
     }
 
-    private func enviarTramaActual() {
-        let t = tramaActual()
-        if escribirBytes(t.bytes) { tramaVisible = t.visible } else { framesDescartados += 1 }
-    }
-
-    @discardableResult
-    func escribirBytes(_ bytes: [UInt8]) -> Bool {
-        guard let out = session?.outputStream, out.hasSpaceAvailable else { return false }
-        let n = out.write(bytes, maxLength: bytes.count)
-        if n == bytes.count { framesEnviados += 1; return true }
-        return false
-    }
-
-    // MARK: Acciones
+    // MARK: Acciones (hilo principal)
     func aplicarJoystick(dx: Double, dy: Double) {
         let s = Swift.max(0.1, Swift.min(1.0, sensibilidad))
-        var y = 127.0 + dx * 127.0 * s
-        var p = 127.0 - dy * 127.0 * s
+        let e = modoFacil ? 0.5 : 0.0
+        func expo(_ v: Double) -> Double { v * (1.0 - e) + v * v * v * e }
+        var y = 127.0 + expo(dx) * 127.0 * s
+        var p = 127.0 - expo(dy) * 127.0 * s
         if invertirYaw { y = 254.0 - y }
         if invertirPitch { p = 254.0 - p }
         yaw = Swift.max(0.0, Swift.min(255.0, y))
@@ -411,6 +545,46 @@ final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
     func centrarJoystick() { yaw = 127; pitch = 127 }
     func fijarGas(_ v: Double) { guard !maniobraActiva else { return }; gasObjetivo = Swift.max(0.0, Swift.min(100.0, v)) }
     func ajustarTrim(_ d: Int) { trim = Swift.max(0, Swift.min(perfilEnUso.trimMax, trim + d)) }
+    func ciclarLuz() { perfilActivo.luz = (perfilActivo.luz + 1) % 8; agregarLog("Luz = \(perfilActivo.luz).") }
+
+    /// Botones de dirección del modo fácil: deflexión limitada al 55 % del recorrido.
+    func empujar(dx: Double, dy: Double) { aplicarJoystick(dx: dx * 0.55, dy: dy * 0.55) }
+
+    func hover() {
+        guard conectado, !maniobraActiva else { return }
+        gasObjetivo = Swift.min(gasHover, topeActual)
+        agregarLog("🪁 HOVER a \(Int(gasObjetivo)) %. Ajusta con − / + hasta que se mantenga a la altura.")
+    }
+
+    func ajustarHover(_ d: Double) {
+        gasHover = Swift.max(10.0, Swift.min(100.0, gasHover + d))
+        if gasObjetivo > 0 && !maniobraActiva { gasObjetivo = Swift.min(gasHover, topeActual) }
+    }
+
+    private func registrarBateria() {
+        guard let pct = bateriaPorcentaje else { return }
+        let ahora = Date()
+        historialBateria.append((ahora, pct))
+        historialBateria.removeAll { ahora.timeIntervalSince($0.0) > 180 }
+        let ult10 = historialBateria.filter { ahora.timeIntervalSince($0.0) <= 10 }.map { $0.1 }
+        bateriaReposo = ult10.max()
+        let ventana = historialBateria.filter { ahora.timeIntervalSince($0.0) <= 120 }
+        guard ventana.count >= 30, let primero = ventana.first, ahora.timeIntervalSince(primero.0) >= 60 else { minutosRestantes = nil; return }
+        let xs = ventana.map { $0.0.timeIntervalSince(primero.0) }
+        let ys = ventana.map { Double($0.1) }
+        let n = Double(xs.count)
+        let sx = xs.reduce(0, +), sy = ys.reduce(0, +)
+        let sxx = xs.map { $0 * $0 }.reduce(0, +)
+        let sxy = zip(xs, ys).map { $0.0 * $0.1 }.reduce(0, +)
+        let den = n * sxx - sx * sx
+        guard den != 0 else { minutosRestantes = nil; return }
+        let pendiente = (n * sxy - sx * sy) / den   // % por segundo (negativa si se descarga)
+        if pendiente < -0.003, let actual = bateriaReposo, actual > 25 {
+            minutosRestantes = Int((Double(actual - 25) / -pendiente / 60.0).rounded())
+        } else {
+            minutosRestantes = nil
+        }
+    }
 
     func mantener(_ pulsado: Bool) {
         guard !maniobraActiva else { return }
@@ -459,11 +633,13 @@ final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
 
     func paradaTotalEmergencia(motivo: String = "botón STOP") {
         timerManiobra?.invalidate()
+        if reproduciendo != nil { reproduccionDetener(motivo: "cortada por \(motivo)") }
+        if grabando { grabacionDetener() }
         maniobraActiva = false
-        gasObjetivo = 0; gasEnviado = 0; pitch = 127; yaw = 127
-        let stop = Codificador.trama(perfil: perfilEnUso, rotor: 0, pitch: 127, yaw: 127, trim: trim, match: match)
-        for _ in 0..<10 { escribirBytes(stop.bytes) }
-        agregarLog("🛑 PARADA TOTAL (\(motivo)): 10 tramas de rotor 0 y gas fijo a 0.")
+        gasObjetivo = 0; pitch = 127; yaw = 127
+        cerrojo.lock(); rafagaStop = 10; cerrojo.unlock()
+        gasEnviado = 0
+        agregarLog("🛑 PARADA TOTAL (\(motivo)): ráfaga de 10 tramas de rotor 0 y gas fijo a 0.")
     }
 
     private func programarManiobra(intervalo: TimeInterval, repite: Bool, bloque: @escaping (Timer) -> Void) {
@@ -473,7 +649,7 @@ final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
         timerManiobra = t
     }
 
-    // MARK: Asistente de reconocimiento de patrón
+    // MARK: Asistente (hilo principal)
     func asistenteIniciar(desde idx: Int = 0) {
         guard conectado else { agregarLog("Asistente: conecta el heli primero."); return }
         guard idx < Perfil.candidatos.count else { asistente = .fracaso; perfilEnPrueba = nil; return }
@@ -481,12 +657,11 @@ final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
         let p = Perfil.candidatos[idx]
         perfilEnPrueba = p
         trim = p.trimNeutro
-        gasObjetivo = 0; gasEnviado = 0; ticksEnCero = 0
+        gasObjetivo = 0
         maniobraActiva = true
         asistente = .probando(idx)
         let ejemplo = Codificador.trama(perfil: p, rotor: 0, pitch: 127, yaw: 127, trim: p.trimNeutro, match: match).visible
         agregarLog("🧪 ASISTENTE \(idx + 1)/\(Perfil.candidatos.count): \(p.nombre) · neutro = \(ejemplo)")
-        // 1,5 s de neutro, luego potenciaAsistente durante 2,5 s, luego gas 0 y pregunta.
         var fase = 0
         programarManiobra(intervalo: 0.1, repite: true) { [weak self] t in
             guard let self = self else { t.invalidate(); return }
@@ -534,18 +709,122 @@ final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
         agregarLog("Asistente cancelado. Perfil activo: \(perfilActivo.nombre).")
     }
 
-    // MARK: Stream delegate y recepción
+    // MARK: Grabar y reproducir vuelos (hilo principal, bucle abierto)
+    struct Muestra: Codable { var t: Double; var gas: Double; var pitch: Double; var yaw: Double }
+    struct Grabacion: Codable, Identifiable, Equatable {
+        var id: UUID
+        var nombre: String
+        var muestras: [Muestra]
+        var duracion: Double { muestras.last?.t ?? 0 }
+    }
+    @Published var grabaciones: [Grabacion] = [] { didSet { guardarGrabaciones() } }
+    @Published var grabando = false
+    @Published var reproduciendo: Grabacion? = nil
+    @Published var progresoReproduccion: Double = 0
+    @Published var repetirEnBucle = false
+    private var timerGrabacion: Timer?
+    private var timerReproduccion: Timer?
+    private var muestrasActuales: [Muestra] = []
+    private var tInicioGrabacion = Date()
+
+    func cargarGrabaciones() {
+        if let d = UserDefaults.standard.data(forKey: "grabaciones"), let g = try? JSONDecoder().decode([Grabacion].self, from: d) {
+            grabaciones = g
+        }
+    }
+    private func guardarGrabaciones() {
+        if let d = try? JSONEncoder().encode(grabaciones) { UserDefaults.standard.set(d, forKey: "grabaciones") }
+    }
+
+    func grabacionIniciar() {
+        guard conectado, !grabando, reproduciendo == nil else { return }
+        muestrasActuales = []
+        tInicioGrabacion = Date()
+        grabando = true
+        agregarLog("⏺ Grabando vuelo: mueve los mandos con normalidad. Pulsa Detener al terminar (con el heli posado).")
+        let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self = self, self.grabando else { return }
+            let el = Date().timeIntervalSince(self.tInicioGrabacion)
+            self.muestrasActuales.append(Muestra(t: el, gas: self.gasObjetivo, pitch: self.pitch, yaw: self.yaw))
+            if el > 180 { self.grabacionDetener() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timerGrabacion = t
+    }
+
+    func grabacionDetener() {
+        guard grabando else { return }
+        timerGrabacion?.invalidate(); timerGrabacion = nil
+        grabando = false
+        var m = muestrasActuales
+        let fin = (m.last?.t ?? 0)
+        m.append(Muestra(t: fin + 0.05, gas: 0, pitch: 127, yaw: 127))
+        m.append(Muestra(t: fin + 2.0, gas: 0, pitch: 127, yaw: 127))
+        let g = Grabacion(id: UUID(), nombre: "Vuelo \(grabaciones.count + 1)", muestras: m)
+        grabaciones.append(g)
+        agregarLog("⏹ Grabación guardada: \(g.nombre), \(String(format: "%.1f", g.duracion)) s, \(m.count) muestras.")
+    }
+
+    func reproducir(_ g: Grabacion) {
+        guard conectado, !maniobraActiva, !grabando, reproduciendo == nil else { agregarLog("No se puede reproducir ahora."); return }
+        reproduciendo = g
+        maniobraActiva = true
+        progresoReproduccion = 0
+        agregarLog("▶️ Reproduciendo \(g.nombre) (\(String(format: "%.1f", g.duracion)) s)\(repetirEnBucle ? " en bucle" : ""). STOP corta en cualquier momento.")
+        var inicio = Date()
+        var idx = 0
+        let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] t in
+            guard let self = self, let g = self.reproduciendo else { t.invalidate(); return }
+            let el = Date().timeIntervalSince(inicio)
+            while idx + 1 < g.muestras.count && g.muestras[idx + 1].t <= el { idx += 1 }
+            if idx < g.muestras.count {
+                let m = g.muestras[idx]
+                self.gasObjetivo = m.gas; self.pitch = m.pitch; self.yaw = m.yaw
+            }
+            self.progresoReproduccion = g.duracion > 0 ? Swift.min(1.0, el / g.duracion) : 1
+            if el >= g.duracion {
+                if self.repetirEnBucle {
+                    inicio = Date(); idx = 0
+                    self.agregarLog("🔁 Repitiendo \(g.nombre).")
+                } else {
+                    self.reproduccionDetener(motivo: "terminada")
+                }
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timerReproduccion = t
+    }
+
+    func reproduccionDetener(motivo: String = "detenida") {
+        timerReproduccion?.invalidate(); timerReproduccion = nil
+        guard let g = reproduciendo else { return }
+        reproduciendo = nil
+        maniobraActiva = false
+        gasObjetivo = 0; pitch = 127; yaw = 127
+        progresoReproduccion = 0
+        agregarLog("⏹ Reproducción de \(g.nombre) \(motivo). Gas 0.")
+    }
+
+    func borrarGrabacion(_ g: Grabacion) { grabaciones.removeAll { $0.id == g.id } }
+
+    func renombrarGrabacion(_ g: Grabacion, _ nombre: String) {
+        if let i = grabaciones.firstIndex(where: { $0.id == g.id }) { grabaciones[i].nombre = nombre }
+    }
+
+    // MARK: Stream delegate (hilo de enlace)
     func stream(_ aStream: Stream, handle eventCode: Stream.Event) {
         switch eventCode {
-        case .hasBytesAvailable: leerEntrada()
+        case .hasBytesAvailable: leerEntrada(aStream as? InputStream)
         case .errorOccurred: agregarLog("STREAM: error de enlace (\(aStream.streamError?.localizedDescription ?? "desconocido")).")
-        case .endEncountered: agregarLog("STREAM: conexión cerrada por el accesorio."); cerrarSesion()
+        case .endEncountered:
+            agregarLog("STREAM: conexión cerrada por el accesorio.")
+            DispatchQueue.main.async { [weak self] in self?.cerrarSesion() }
         default: break
         }
     }
 
-    private func leerEntrada() {
-        guard let inp = session?.inputStream else { return }
+    private func leerEntrada(_ inp: InputStream?) {
+        guard let inp = inp else { return }
         var buf = [UInt8](repeating: 0, count: 128)
         var leidos: [UInt8] = []
         while inp.hasBytesAvailable {
@@ -556,22 +835,35 @@ final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
         guard !leidos.isEmpty else { return }
         rxBuffer.append(contentsOf: leidos)
         if rxBuffer.count > 64 { rxBuffer.removeFirst(rxBuffer.count - 64) }
-        rxHex = leidos.map { String(format: "%02X", $0) }.joined(separator: " ")
-        rxTexto = String(rxBuffer.map { (32...126).contains($0) ? Character(UnicodeScalar($0)) : "·" })
-        // Respuesta oficial: 4 dígitos hex en texto. bits 2-3 batería, bits 4-5 emergencia.
-        let hexChars = rxBuffer.reversed().prefix(while: { c in (48...57).contains(c) || (65...70).contains(c) || (97...102).contains(c) })
-        if hexChars.count >= 4, let v = Int(String(hexChars.reversed().suffix(4).map { Character(UnicodeScalar($0)) }), radix: 16) {
-            rxBateria = (v >> 2) & 3
-            rxEmergencia = (v >> 4) & 3
+        let hex = leidos.map { String(format: "%02X", $0) }.joined(separator: " ")
+        let texto = String(rxBuffer.map { (32...126).contains($0) ? Character(UnicodeScalar($0)) : "·" })
+
+        // Respuesta observada: 'x' (0x78), nivel de batería (múltiplo de 7, 168 = lleno), flag, 0.
+        var nivel: Int? = nil
+        var flag: Int? = nil
+        if let idx = rxBuffer.lastIndex(of: 0x78), idx + 2 < rxBuffer.count {
+            nivel = Int(rxBuffer[idx + 1])
+            flag = Int(rxBuffer[idx + 2])
         }
-        if Date().timeIntervalSince(tUltimoLogRx) > 2.0 {
-            tUltimoLogRx = Date()
-            let txt = String(leidos.map { (32...126).contains($0) ? Character(UnicodeScalar($0)) : "·" })
-            agregarLog("RX heli: \(rxHex)  \"\(txt)\"")
+        let logAhora = Date().timeIntervalSince(tUltimoLogRx) > 2.0
+        if logAhora { tUltimoLogRx = Date() }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.rxHex = hex; self.rxTexto = texto
+            if let n = nivel { self.rxNivel = n; self.registrarBateria() }
+            if let f = flag { self.rxFlag = f }
+            if logAhora {
+                let pct = self.bateriaPorcentaje.map { "\($0) %" } ?? "?"
+                self.agregarLog("RX heli: \(hex) → batería \(pct)\(self.rxFlag != 0 ? " · flag \(self.rxFlag)" : "")")
+            }
         }
     }
 
     func agregarLog(_ s: String) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in self?.agregarLog(s) }
+            return
+        }
         let df = DateFormatter(); df.dateFormat = "HH:mm:ss"
         log = "[\(df.string(from: Date()))] \(s)\n" + log
         if log.count > 20000 { log = String(log.prefix(20000)) }
@@ -592,10 +884,10 @@ struct ContentView: View {
     var body: some View {
         TabView {
             VueloView(pilot: pilot).tabItem { Label("Vuelo", systemImage: "gamecontroller.fill") }
-            AsistenteView(pilot: pilot).tabItem { Label("Asistente", systemImage: "wand.and.stars") }
+            RutasView(pilot: pilot).tabItem { Label("Rutas", systemImage: "point.topleft.down.curvedto.point.bottomright.up") }
             CabinaView(pilot: pilot).tabItem { Label("Cabina", systemImage: "slider.horizontal.3") }
+            AsistenteView(pilot: pilot).tabItem { Label("Diagnóstico", systemImage: "wand.and.stars") }
             AjustesView(pilot: pilot).tabItem { Label("Protocolo", systemImage: "waveform.path.ecg") }
-            ConsolaView(pilot: pilot).tabItem { Label("Consola", systemImage: "terminal.fill") }
         }
         .onChange(of: scenePhase) { fase in
             if fase != .active && (pilot.gasObjetivo > 0 || pilot.gasEnviado > 0) {
@@ -619,7 +911,9 @@ struct BannerConexion: View {
                     if pilot.conectado {
                         Text(verbatim: "\(pilot.hzReal) Hz · \(pilot.framesEnviados) tx · \(pilot.framesDescartados) desc · canal \(nombreCanal(pilot.match))")
                             .font(.caption2).foregroundColor(.secondary)
-                        Text(verbatim: "Perfil: \(pilot.perfilEnUso.nombre)").font(.caption2).foregroundColor(.blue)
+                        Text(verbatim: "Perfil: \(pilot.perfilEnUso.nombre)" + (pilot.bateriaPorcentaje.map { " · 🔋 \($0) %" } ?? "")).font(.caption2).foregroundColor(.blue)
+                    } else if let hasta = pilot.reconexionBloqueadaHasta, hasta > Date() {
+                        Text(verbatim: "⛔ Parada dura: reconexión pausada unos segundos.").font(.caption2).foregroundColor(.red)
                     } else {
                         Text(verbatim: "Enciende el heli. Si no conecta solo: Ajustes → Bluetooth → Chatboard, o pulsa Vincular.")
                             .font(.caption2).foregroundColor(.secondary)
@@ -655,7 +949,7 @@ struct BotonesStop: View {
                 }
                 .buttonStyle(.bordered).tint(.red)
             }
-            Text(verbatim: "STOP manda rotor 0 sin parar. PARADA DURA corta el enlace Bluetooth (el heli se detiene al perderlo) y reconecta en 2 s.")
+            Text(verbatim: "STOP manda rotor 0 sin parar (es el corte normal). PARADA DURA cierra la sesión y deja al heli 6 s sin tramas antes de reconectar.")
                 .font(.caption2).foregroundColor(.secondary)
         }
     }
@@ -682,7 +976,11 @@ struct VueloView: View {
                             botonesTrim
                         }
                         .frame(maxWidth: .infinity)
-                        JoystickPad(pilot: pilot).frame(width: ladoJoystick(geo), height: ladoJoystick(geo))
+                        if pilot.modoFacil {
+                            BotonesDireccion(pilot: pilot).frame(width: ladoJoystick(geo), height: ladoJoystick(geo))
+                        } else {
+                            JoystickPad(pilot: pilot).frame(width: ladoJoystick(geo), height: ladoJoystick(geo))
+                        }
                     }
                     .frame(maxHeight: .infinity)
                     barraInferior
@@ -708,6 +1006,14 @@ struct VueloView: View {
                     .font(.caption2).foregroundColor(.secondary)
             }
             Spacer()
+            Button(action: { pilot.modoFacil.toggle() }) {
+                Text(verbatim: pilot.modoFacil ? "FÁCIL" : "PRO").font(.caption2).bold().padding(6)
+            }
+            .buttonStyle(.bordered).tint(pilot.modoFacil ? .green : .blue)
+            Button(action: { pilot.ciclarLuz() }) {
+                HStack(spacing: 2) { Image(systemName: "lightbulb.fill"); Text(verbatim: "\(pilot.perfilActivo.luz)").font(.caption2) }.padding(6)
+            }
+            .buttonStyle(.bordered).tint(.yellow)
             Button(action: { pilot.paradaDura() }) {
                 Image(systemName: "bolt.slash.fill").padding(6)
             }
@@ -740,9 +1046,24 @@ struct VueloView: View {
                 VStack { Text(verbatim: "YAW").font(.caption2).foregroundColor(.secondary); Text(verbatim: "\(Int(pilot.yaw))").font(.footnote).bold().monospacedDigit() }
             }
             .padding(.horizontal, 4)
-            if let b = pilot.rxBateria {
-                Text(verbatim: "🔋 \(b)/3" + ((pilot.rxEmergencia ?? 0) != 0 ? " · ⚠️ emergencia \(pilot.rxEmergencia ?? 0)" : ""))
-                    .font(.caption2)
+            if let b = pilot.bateriaReposo ?? pilot.bateriaPorcentaje {
+                Text(verbatim: "🔋 \(b) %" + (pilot.minutosRestantes.map { " · ≈ \($0) min" } ?? "") + (pilot.rxFlag != 0 ? " · flag \(pilot.rxFlag)" : ""))
+                    .font(.caption).bold().foregroundColor(b < 30 ? .red : (b < 60 ? .orange : .green))
+            }
+            if pilot.modoFacil {
+                HStack(spacing: 6) {
+                    Button(action: { pilot.ajustarHover(-2) }) { Image(systemName: "minus").frame(width: 26, height: 26) }.buttonStyle(.bordered)
+                    Button(action: { pilot.hover() }) {
+                        VStack(spacing: 0) { Text(verbatim: "HOVER").bold(); Text(verbatim: "\(Int(pilot.gasHover)) %").font(.caption2) }.frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent).tint(.green).disabled(!pilot.conectado || pilot.maniobraActiva)
+                    Button(action: { pilot.ajustarHover(2) }) { Image(systemName: "plus").frame(width: 26, height: 26) }.buttonStyle(.bordered)
+                }
+                Button(action: { pilot.aterrizarSuave() }) { Text(verbatim: "🛬 ATERRIZAR").bold().frame(maxWidth: .infinity) }
+                    .buttonStyle(.bordered).tint(.blue).disabled(pilot.gasObjetivo <= 0 || pilot.maniobraActiva)
+            }
+            if let hasta = pilot.reconexionBloqueadaHasta, hasta > Date() {
+                Text(verbatim: "⛔ parada dura: sin tramas, reconecta en unos segundos").font(.caption2).foregroundColor(.red)
             }
         }
     }
@@ -876,6 +1197,153 @@ struct JoystickPad: View {
     }
 }
 
+// Botones de dirección del modo fácil: mantener pulsado mueve, soltar centra.
+struct BotonesDireccion: View {
+    @ObservedObject var pilot: HeliPilot
+    var body: some View {
+        GeometryReader { g in
+            let lado = Swift.min(g.size.width, g.size.height)
+            let b = Swift.max(40, lado / 3 - 6)
+            VStack(spacing: 6) {
+                HStack(spacing: 6) {
+                    Color.clear.frame(width: b, height: b)
+                    BotonEmpuje(pilot: pilot, icono: "arrow.up", texto: "adelante", dx: 0, dy: -1, lado: b)
+                    Color.clear.frame(width: b, height: b)
+                }
+                HStack(spacing: 6) {
+                    BotonEmpuje(pilot: pilot, icono: "arrow.counterclockwise", texto: "girar izq", dx: -1, dy: 0, lado: b)
+                    ZStack {
+                        Circle().fill(Color(UIColor.secondarySystemBackground))
+                        VStack(spacing: 2) {
+                            Text(verbatim: "P \(Int(pilot.pitch))").font(.caption2).monospacedDigit()
+                            Text(verbatim: "Y \(Int(pilot.yaw))").font(.caption2).monospacedDigit()
+                        }.foregroundColor(.secondary)
+                    }.frame(width: b, height: b)
+                    BotonEmpuje(pilot: pilot, icono: "arrow.clockwise", texto: "girar der", dx: 1, dy: 0, lado: b)
+                }
+                HStack(spacing: 6) {
+                    Color.clear.frame(width: b, height: b)
+                    BotonEmpuje(pilot: pilot, icono: "arrow.down", texto: "atrás", dx: 0, dy: 1, lado: b)
+                    Color.clear.frame(width: b, height: b)
+                }
+            }
+            .frame(width: lado, height: lado)
+            .position(x: g.size.width / 2, y: g.size.height / 2)
+        }
+    }
+}
+
+struct BotonEmpuje: View {
+    @ObservedObject var pilot: HeliPilot
+    let icono: String
+    let texto: String
+    let dx: Double
+    let dy: Double
+    let lado: CGFloat
+    @State private var pulsado = false
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 14).fill(pulsado ? Color.blue : Color.blue.opacity(pilot.conectado ? 0.22 : 0.08))
+            VStack(spacing: 2) {
+                Image(systemName: icono).font(.title2)
+                Text(verbatim: texto).font(.caption2)
+            }
+            .foregroundColor(pulsado ? .white : .primary)
+        }
+        .frame(width: lado, height: lado)
+        .contentShape(Rectangle())
+        .onLongPressGesture(minimumDuration: .infinity, maximumDistance: 80, pressing: { p in
+            guard pilot.conectado else { return }
+            pulsado = p
+            if p { pilot.empujar(dx: dx, dy: dy) } else { pilot.centrarJoystick() }
+        }, perform: {})
+        .onDisappear { if pulsado { pulsado = false; pilot.centrarJoystick() } }
+    }
+}
+
+// =====================================================================
+// MARK: - TAB RUTAS (grabar y repetir vuelos)
+// =====================================================================
+struct RutasView: View {
+    @ObservedObject var pilot: HeliPilot
+
+    var body: some View {
+        NavigationView {
+            Form {
+                BannerConexion(pilot: pilot)
+                BotonesStop(pilot: pilot)
+
+                Section(header: Text(verbatim: "GRABAR UN VUELO"),
+                        footer: Text(verbatim: "Graba lo que haces con los mandos (gas, pitch, yaw) 20 veces por segundo. Vuela desde Vuelo o Cabina mientras graba; al detener, la ruta termina siempre con 2 s de gas 0. Máximo 3 minutos.")) {
+                    if pilot.grabando {
+                        HStack {
+                            Circle().fill(Color.red).frame(width: 12, height: 12)
+                            Text(verbatim: "Grabando… vuela con normalidad").bold()
+                            Spacer()
+                            Button(action: { pilot.grabacionDetener() }) { Text(verbatim: "⏹ Detener y guardar").bold() }
+                                .buttonStyle(.borderedProminent).tint(.red)
+                        }
+                    } else {
+                        Button(action: { pilot.grabacionIniciar() }) {
+                            HStack { Spacer(); Image(systemName: "record.circle"); Text(verbatim: "⏺ EMPEZAR A GRABAR").bold(); Spacer() }
+                        }
+                        .buttonStyle(.borderedProminent).tint(.red)
+                        .disabled(!pilot.conectado || pilot.reproduciendo != nil || pilot.maniobraActiva)
+                    }
+                }
+
+                Section(header: Text(verbatim: "RUTAS GUARDADAS"),
+                        footer: Text(verbatim: "La reproducción repite los mismos mandos con los mismos tiempos. El heli no tiene sensores de posición, así que el recorrido será parecido, no idéntico: la batería, el aire y el suelo cambian el resultado. Empieza siempre desde el mismo punto, con el heli posado y sin obstáculos cerca. STOP corta en cualquier momento.")) {
+                    if pilot.grabaciones.isEmpty {
+                        Text(verbatim: "Todavía no hay rutas. Graba la primera arriba.").foregroundColor(.secondary)
+                    }
+                    ForEach(pilot.grabaciones) { g in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                TextField("Nombre", text: Binding(get: { g.nombre }, set: { pilot.renombrarGrabacion(g, $0) })).font(.headline)
+                                Spacer()
+                                Text(verbatim: String(format: "%.1f s · %d muestras", g.duracion, g.muestras.count)).font(.caption).foregroundColor(.secondary)
+                            }
+                            if pilot.reproduciendo?.id == g.id {
+                                ProgressView(value: pilot.progresoReproduccion)
+                                Button(action: { pilot.reproduccionDetener() }) {
+                                    HStack { Spacer(); Text(verbatim: "⏹ DETENER REPRODUCCIÓN").bold(); Spacer() }
+                                }
+                                .buttonStyle(.borderedProminent).tint(.red)
+                            } else {
+                                HStack(spacing: 10) {
+                                    Button(action: { pilot.reproducir(g) }) {
+                                        HStack { Spacer(); Image(systemName: "play.fill"); Text(verbatim: "REPRODUCIR").bold(); Spacer() }
+                                    }
+                                    .buttonStyle(.borderedProminent).tint(.green)
+                                    .disabled(!pilot.conectado || pilot.reproduciendo != nil || pilot.grabando || pilot.maniobraActiva)
+                                    Button(action: { pilot.borrarGrabacion(g) }) { Image(systemName: "trash") }
+                                        .buttonStyle(.bordered).tint(.red)
+                                        .disabled(pilot.reproduciendo != nil)
+                                }
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    Toggle(isOn: $pilot.repetirEnBucle) {
+                        VStack(alignment: .leading) {
+                            Text(verbatim: "Repetir en bucle").bold()
+                            Text(verbatim: "Encadena la ruta una y otra vez hasta que pulses Detener o STOP.").font(.caption2).foregroundColor(.secondary)
+                        }
+                    }
+                }
+
+                Section(header: Text(verbatim: "¿Y VUELO AUTÓNOMO DE VERDAD?")) {
+                    Text(verbatim: "El heli solo nos envía el nivel de batería: no sabe dónde está. Para que vaya a un sitio y vuelva de forma exacta hace falta que alguien lo vea. La forma correcta es usar la cámara del iPhone como torre de control: el móvil fijo en un trípode mirando la habitación, siguiendo el heli por su color o sus luces, y la app corrigiendo gas, pitch y yaw varias veces por segundo para llevarlo al punto que le marques en pantalla. Eso ya no es repetir mandos: es control en bucle cerrado, y es el siguiente paso de esta app.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            .navigationTitle("Rutas")
+        }
+    }
+}
+
 // =====================================================================
 // MARK: - TAB ASISTENTE
 // =====================================================================
@@ -888,7 +1356,14 @@ struct AsistenteView: View {
                 BannerConexion(pilot: pilot)
                 BotonesStop(pilot: pilot)
 
-                Section(header: Text(verbatim: "RECONOCER EL PATRÓN DEL HELI"),
+                Section(header: Text(verbatim: "¿PARA QUÉ SIRVE ESTO?")) {
+                    Text(verbatim: "El asistente ya reconoció el protocolo real del heli (Silverlit oficial, texto hex) y está guardado. No necesitas volver a ejecutarlo salvo que un día deje de responder.")
+                        .font(.caption)
+                    Text(verbatim: "El canal A/B/C/D no es un modo: es el identificador para volar varios helis en la misma habitación sin que se mezclen. Con un solo heli, cualquiera funciona igual. Déjalo en B.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+
+                Section(header: Text(verbatim: "RECONOCER EL PATRÓN DEL HELI (solo si hace falta)"),
                         footer: Text(verbatim: "Prueba cada formato de trama con el rotor a la potencia indicada durante 2,5 s (sujeta el heli). Cuando las palas giren, pulsa SÍ y ese perfil queda guardado para la pestaña Vuelo. El primero de la lista es el protocolo real extraído de la app oficial.")) {
                     HStack {
                         Text(verbatim: "Potencia de prueba").bold()
@@ -957,7 +1432,7 @@ struct AsistenteView: View {
                     Text(verbatim: "Toca un perfil para activarlo directamente sin pasar por el asistente.").font(.caption2).foregroundColor(.secondary)
                 }
             }
-            .navigationTitle("Asistente")
+            .navigationTitle("Diagnóstico")
         }
     }
 }
@@ -999,6 +1474,8 @@ struct CabinaView: View {
                     Text(verbatim: "Desactívalo solo en exterior.").font(.caption2).foregroundColor(.secondary)
                 }
             }.tint(.green)
+            Text(verbatim: "Batería: se lee en tiempo real de la respuesta del heli mientras está encendido y conectado. Con el interruptor en OFF‑CHG el heli está apagado y no emite, así que la carga no se puede ver desde la app: mira el LED del cargador.")
+                .font(.caption2).foregroundColor(.secondary)
             Toggle(isOn: $pilot.armadoActivo) {
                 VStack(alignment: .leading) {
                     Text(verbatim: "Armado previo (0,4 s a rotor 0 antes de subir)").bold()
@@ -1061,6 +1538,7 @@ struct CabinaView: View {
             }
             Toggle(isOn: $pilot.autoCentrar) { Text(verbatim: "Auto‑centrar al soltar (sliders)") }
             Stepper(value: $pilot.trim, in: 0...pilot.perfilEnUso.trimMax) { Text(verbatim: "Trim: \(pilot.trim) (neutro \(pilot.perfilEnUso.trimNeutro))") }
+            Stepper(value: $pilot.perfilActivo.luz, in: 0...7) { Text(verbatim: "Luz: \(pilot.perfilActivo.luz)  (prueba valores: la app oficial usaba 4 por defecto)") }
             Picker(selection: $pilot.match) {
                 Text(verbatim: "A").tag(0); Text(verbatim: "B").tag(1); Text(verbatim: "C").tag(2); Text(verbatim: "D").tag(3)
             } label: { Text(verbatim: "Canal") }
@@ -1070,6 +1548,17 @@ struct CabinaView: View {
 
     var seccionAjustesMandos: some View {
         Section(header: Text(verbatim: "MANDOS DE LA PESTAÑA VUELO").bold()) {
+            Toggle(isOn: $pilot.modoFacil) {
+                VStack(alignment: .leading) {
+                    Text(verbatim: "Modo fácil").bold()
+                    Text(verbatim: "Botones grandes de dirección (mantener = mover, soltar = centrar) en vez de joystick, curva suave y botón HOVER con el gas memorizado.").font(.caption2).foregroundColor(.secondary)
+                }
+            }.tint(.green)
+            VStack(alignment: .leading) {
+                HStack { Text(verbatim: "Gas de HOVER").bold(); Spacer(); Text(verbatim: "\(Int(pilot.gasHover)) %").font(.caption) }
+                Slider(value: $pilot.gasHover, in: 10...100, step: 1)
+                Text(verbatim: "El gas con el que el heli se queda quieto en el aire. Se afina en vuelo con − / + y se recuerda. Baja con la batería.").font(.caption2).foregroundColor(.secondary)
+            }
             Toggle(isOn: $pilot.gasSpring) {
                 VStack(alignment: .leading) {
                     Text(verbatim: "Palanca de gas: al soltar → 0").bold()
@@ -1121,6 +1610,11 @@ struct AjustesView: View {
     var body: some View {
         NavigationView {
             Form {
+                Section(header: Text(verbatim: "PANEL EXPERTO")) {
+                    Text(verbatim: "No hace falta tocar nada aquí: el perfil correcto ya está activo y guardado. Esta pestaña sirve para ver la trama exacta que sale, lo que responde el heli y, si algún día cambia algo, ajustar cualquier detalle del protocolo sin recompilar.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+
                 Section(header: Text(verbatim: "TRAMA EN VIVO")) {
                     Text(verbatim: pilot.tramaVisible.isEmpty ? Codificador.trama(perfil: pilot.perfilEnUso, rotor: 0, pitch: 127, yaw: 127, trim: pilot.trim, match: pilot.match).visible : pilot.tramaVisible)
                         .font(.system(.body, design: .monospaced)).foregroundColor(.blue)
@@ -1134,8 +1628,8 @@ struct AjustesView: View {
                         Text(verbatim: "RX hex").foregroundColor(.secondary); Spacer()
                         Text(verbatim: pilot.rxHex.isEmpty ? "--" : pilot.rxHex).font(.system(.caption2, design: .monospaced)).foregroundColor(.purple).lineLimit(2)
                     }
-                    if let b = pilot.rxBateria {
-                        Text(verbatim: "Decodificado: batería \(b)/3 · emergencia \(pilot.rxEmergencia ?? 0)").font(.caption)
+                    if let n = pilot.rxNivel {
+                        Text(verbatim: "Decodificado: respuesta 'x' + nivel \(n) (168 = lleno, baja con la carga del motor) → batería \(pilot.bateriaPorcentaje ?? 0) % · flag \(pilot.rxFlag)").font(.caption)
                     }
                 }
 
@@ -1191,13 +1685,22 @@ struct AjustesView: View {
                     Button(action: { pilot.cerrarSesion() }) { Text(verbatim: "✂️ Cerrar sesión MFi").foregroundColor(.red) }
                 }
 
+                Section(header: Text(verbatim: "CONSOLA")) {
+                    TextEditor(text: $pilot.log).font(.system(.caption, design: .monospaced)).frame(minHeight: 260)
+                    HStack {
+                        Button(action: { UIPasteboard.general.string = pilot.log; pilot.agregarLog("Copiado al portapapeles.") }) { Text(verbatim: "Copiar registro") }
+                        Spacer()
+                        Button(action: { pilot.log = "" }) { Text(verbatim: "Limpiar").foregroundColor(.red) }
+                    }
+                }
+
                 Section(header: Text(verbatim: "REFERENCIA (binario oficial sHelicopter 2011)")) {
                     Text(verbatim: "Trama = \"x\" + %llx del entero de 40 bits, relleno a 10 dígitos, UTF-8, sin checksum ni terminador. 20 Hz.")
                         .font(.caption2).foregroundColor(.secondary)
                     Text(verbatim: "bits 0-4 trim (0..20) · 5-7 luz · 8-15 yaw · 16-23 pitch · 24-31 rotor (0..128) · 38-39 canal")
                         .font(.caption2).foregroundColor(.secondary)
                     Text(verbatim: "Neutro canal B, gas 0: x40007f7f8a").font(.system(.caption, design: .monospaced))
-                    Text(verbatim: "Respuesta: 4 dígitos hex · bits 2-3 batería · bits 4-5 emergencia").font(.caption2).foregroundColor(.secondary)
+                    Text(verbatim: "Respuesta observada: 4 bytes 78 NN FF 00 = 'x' + nivel de batería (múltiplo de 7, 168 lleno) + flag + 0").font(.caption2).foregroundColor(.secondary)
                 }
             }
             .navigationTitle("Protocolo")

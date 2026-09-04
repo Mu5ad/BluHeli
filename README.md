@@ -1,4 +1,4 @@
-# BluHeli — Pilot v12
+# BluHeli — Pilot v13
 
 App iOS (SwiftUI + ExternalAccessory) para controlar el Silverlit Blue Sky Heli **BSH-A**
 (accesorio MFi Bluetooth 2.1, nombre BT `Chatboard`).

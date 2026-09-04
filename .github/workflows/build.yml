@@ -51,8 +51,8 @@ jobs:
         if: startsWith(github.ref, 'refs/heads/')
         with:
           tag_name: "v4.${{ github.run_number }}"
-          name: "BluHeli Pilot v12 (Build ${{ github.run_number }})"
-          body: "Pilot v12: protocolo REAL extraido del binario oficial (trama de texto x+10 hex, rotor 0..128, 20 Hz), asistente Reconocer patron con 6 perfiles, todo editable en la pestana Protocolo, mandos de vuelo, STOP y PARADA DURA. IPA sin firmar para Feather."
+          name: "BluHeli Pilot v13 (Build ${{ github.run_number }})"
+          body: "Pilot v13: envio en hilo de enlace propio (sin huecos al redibujar la UI), bateria real desde la respuesta del heli, parada dura con bloqueo de 6 s, boton de luz, explicaciones en Diagnostico y Protocolo. Protocolo texto x+10 hex confirmado en vuelo."
           files: BluHeli-unsigned.ipa
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
