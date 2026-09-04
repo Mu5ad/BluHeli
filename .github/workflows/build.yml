@@ -51,8 +51,8 @@ jobs:
         if: startsWith(github.ref, 'refs/heads/')
         with:
           tag_name: "v4.${{ github.run_number }}"
-          name: "BluHeli Master v4 (Build ${{ github.run_number }})"
-          body: "IPA final de BluHeli lista para firmar con Feather con soporte completo para SL_BluTechHeli y todos los protocolos MFi."
+          name: "BluHeli Pilot v11 (Build ${{ github.run_number }})"
+          body: "Pilot v11: mandos reales (palanca de gas + joystick), stream 20 Hz inmune al arrastre (RunLoop .common), armado + rampa de gas, modo salón (tope 65 %), STOP y corte en segundo plano. IPA sin firmar para Feather."
           files: BluHeli-unsigned.ipa
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

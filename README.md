@@ -1,39 +1,30 @@
-# BluHeli — mando nativo para tu Silverlit BluTechHeli (BSH-A) desde el iPhone
+# BluHeli — Pilot v11
 
-App SwiftUI que habla con el heli por **ExternalAccessory (el canal MFi que iOS ya te
-demostró que funciona)** mandando el protocolo real de 5 bytes extraído del config.xml
-oficial de Silverlit:
+App iOS (SwiftUI + ExternalAccessory) para controlar el Silverlit Blue Sky Heli **BSH-A**
+(accesorio MFi Bluetooth 2.1, nombre BT `Chatboard`).
 
-```
-Byte 0: 0xB8   Byte 1: gas (64=stop, máx 128)   Byte 2: pitch (127 neutro)
-Byte 3: yaw (127 neutro)   Byte 4: luces<<5 | trim   (neutro 0x38)
-```
+## Protocolo confirmado (Build 16, el heli despegó)
+Trama WeCCAN de 6 bytes a 20 Hz continuos, Canal C (match 2):
 
-## Cómo generar la IPA (sin Mac, 5 minutos)
+| Byte | Campo | Valor |
+|------|-------|-------|
+| 0 | luces | `0xF0` on / `0x00` off |
+| 1 | trim | 0..32 (16 neutro) |
+| 2 | yaw | 0..255 (127 neutro) |
+| 3 | pitch | 0..255 (127 neutro) |
+| 4 | gas | 0..255 (190 = despegue brusco, ~120 sustentación) |
+| 5 | flags | `(match << 6) \| 0x2A` → Canal C = `0xAA` |
 
-1. Crea un repo en github.com (botón New repository, nombre `BluHeli`, público o privado)
-2. Sube TODO el contenido de esta carpeta (`.github` incluido — en GitHub actívalo
-   con "Add file → Upload files" y arrastra las carpetas; ojo: las carpetas que
-   empiezan por punto se suben bien por web)
-3. Pestaña **Actions** del repo → si te avisa, pulsa "Enable workflows"
-4. Entra en el workflow **"Build BluHeli"** → botón **Run workflow** → Run
-5. En 3-5 minutos, en el resumen de la ejecución, sección **Artifacts**, descarga
-   `BluHeli-unsigned-ipa` → dentro viene `BluHeli-unsigned.ipa`
-6. Pásala al iPhone (AirDrop, iCloud, lo que sea) → **Feather → Import from Files →
-   Sign con tu cert → Install**
+Trama que voló: `F0 0A 7F 7F BE AA`.
 
-## Qué hace la app
+## Qué hace v11
+- **Vuelo**: palanca de gas vertical (izq) + joystick pitch/yaw con retorno al centro (der), trim, STOP.
+- **Cabina**: sliders, botón "mantener para volar" (suelta = gas 0), despegue/aterrizaje asistidos, ajustes.
+- **Pruebas**: pulsos de 2 s con armado y rampa, rampa configurable, herramientas de conexión.
+- Stream de 20 Hz en `RunLoop.Mode.common` (no se congela al arrastrar mandos).
+- Armado (0,4 s a gas 0) → rampa de subida → bajada instantánea. Modo salón con tope al 65 %.
+- Corte de gas si la app pasa a segundo plano o se cae el enlace MFi.
 
-- **Escanea** accesorios MFi emparejados y lista sus protocolStrings (los "canales" MFi)
-- Conecta con el que elijas (hay 8 protocolos candidatos pre-cargados)
-- **Mando completo**: slider de GAS (64-128, con tope de seguridad configurable),
-  PITCH, YAW, luces, STOP de emergencia, y envío continuo a 20 Hz (el heli necesita
-  tramas constantes, si sueltas el enlace corta motores)
-- **Log en vivo** de todo lo que entra/sale en hex
-
-## Si el heli no aparece en la lista
-
-Entonces iOS no le asigna ningún protocolo MFi compatible y la app no podrá abrirle
-sesión (el emparejamiento fue solo un registro ACL). En ese caso el plan B es el PC:
-`/opt/data/heli/silverlit_heli.py` ya tiene el protocolo y funciona con cualquier
-adaptador Bluetooth clásico.
+## Compilación
+Push a `main` → GitHub Actions (macos-15, xcodegen) → Release `v4.<run>` con `BluHeli-unsigned.ipa`.
+Instalar con Feather en el iPhone. Si el heli se apaga, reconectar en Ajustes → Bluetooth → Chatboard.

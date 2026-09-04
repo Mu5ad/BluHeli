@@ -31,4 +31,9 @@ targets:
         NSBluetoothAlwaysUsageDescription: "Blu-Tech Heli usa Bluetooth para controlar tu helicóptero Silverlit."
         NSBluetoothPeripheralUsageDescription: "Blu-Tech Heli se comunica con el accesorio MFi del helicóptero."
         UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: true
         CODE_SIGNING_ALLOWED: "NO"
