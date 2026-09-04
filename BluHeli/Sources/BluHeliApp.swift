@@ -710,7 +710,7 @@ final class HeliPilot: NSObject, ObservableObject, StreamDelegate {
     }
 
     // MARK: Grabar y reproducir vuelos (hilo principal, bucle abierto)
-    struct Muestra: Codable { var t: Double; var gas: Double; var pitch: Double; var yaw: Double }
+    struct Muestra: Codable, Equatable { var t: Double; var gas: Double; var pitch: Double; var yaw: Double }
     struct Grabacion: Codable, Identifiable, Equatable {
         var id: UUID
         var nombre: String

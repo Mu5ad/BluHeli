@@ -30,7 +30,7 @@ jobs:
             -configuration Release \
             -destination "generic/platform=iOS" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
-            archive -archivePath BluHeli/build/BluHeli.xcarchive 2>&1 | tail -40
+            archive -archivePath BluHeli/build/BluHeli.xcarchive 2>&1 | tail -120
 
       - name: Empaquetar IPA
         run: |
