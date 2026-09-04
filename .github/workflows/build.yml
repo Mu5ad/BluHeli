@@ -51,8 +51,8 @@ jobs:
         if: startsWith(github.ref, 'refs/heads/')
         with:
           tag_name: "v4.${{ github.run_number }}"
-          name: "BluHeli Pilot v11 (Build ${{ github.run_number }})"
-          body: "Pilot v11: mandos reales (palanca de gas + joystick), stream 20 Hz inmune al arrastre (RunLoop .common), armado + rampa de gas, modo salón (tope 65 %), STOP y corte en segundo plano. IPA sin firmar para Feather."
+          name: "BluHeli Pilot v12 (Build ${{ github.run_number }})"
+          body: "Pilot v12: protocolo REAL extraido del binario oficial (trama de texto x+10 hex, rotor 0..128, 20 Hz), asistente Reconocer patron con 6 perfiles, todo editable en la pestana Protocolo, mandos de vuelo, STOP y PARADA DURA. IPA sin firmar para Feather."
           files: BluHeli-unsigned.ipa
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

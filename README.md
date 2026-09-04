@@ -1,9 +1,15 @@
-# BluHeli — Pilot v11
+# BluHeli — Pilot v12
 
 App iOS (SwiftUI + ExternalAccessory) para controlar el Silverlit Blue Sky Heli **BSH-A**
 (accesorio MFi Bluetooth 2.1, nombre BT `Chatboard`).
 
-## Protocolo confirmado (Build 16, el heli despegó)
+## Protocolo REAL (ingeniería inversa del binario oficial sHelicopter, v12)
+
+La app oficial envía **texto ASCII**: `"x"` + 10 dígitos hex minúsculas (`%llx` del entero de 40 bits, relleno a 5 bytes), UTF-8, sin checksum, a 20 Hz.
+Campos: bits 0-4 trim (0..20, mid 10) · 5-7 luz (mid 4) · 8-15 yaw · 16-23 pitch · 24-31 rotor (0..128) · 38-39 canal btMatch.
+Neutro canal B gas 0: `x40007f7f8a`. Respuesta del heli: 4 dígitos hex, bits 2-3 batería, bits 4-5 emergencia.
+
+## Trama binaria de la Build 16 (histórico: hizo despegar el heli sin control)
 Trama WeCCAN de 6 bytes a 20 Hz continuos, Canal C (match 2):
 
 | Byte | Campo | Valor |
